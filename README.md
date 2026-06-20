@@ -1,7 +1,7 @@
 # wifiscan
 
 ![platform](https://img.shields.io/badge/platform-macOS%2012%2B-black?logo=apple)
-![language](https://img.shields.io/badge/Swift-6-orange?logo=swift)
+![language](https://img.shields.io/badge/Swift-5.9%2B-orange?logo=swift)
 ![dependencies](https://img.shields.io/badge/dependencies-none-brightgreen)
 ![license](https://img.shields.io/badge/license-MIT-blue)
 
@@ -34,7 +34,7 @@ third‑party packages.
    5 GHz     ch 36 (1ap)  ch 40 (1ap)   ch 44 (2ap)    non-DFS (preferred)
              ch 100 (0ap) ch 104 (0ap)  ch 108 (0ap)   DFS* — cleaner, but may drop on radar
  ────────────────────────────────────────────────────────────────────────────────────────
- [q]uit  [r]escan  [g]raph  [a]uto  [p]ower [s]nr [c]han [n]ame [w]idth s[e]c  [b]and 1/2/6/0  [+/-]interval
+ [q]uit  [r]escan  [g]raph  [a]uto  [p]ower [s]nr [c]han [n]ame [w]idth s[e]c  [b]and 1/2/6/0  [j/k]scroll  [+/-]interval
 ```
 
 ## Contents
@@ -156,11 +156,12 @@ wifiscan --help           # usage summary
 | `--once` | Single scan; print the table, channel map and recommendations, then exit. |
 | `--json` | Single scan; emit a JSON array on stdout. |
 | `--diag` | Print interface, permission status, network/SSID counts and the app bundle path. |
-| `--sort KEY` | Initial sort: `power` \| `snr` \| `channel` \| `name` \| `band` \| `width` \| `security`. |
-| `--interval N` | Auto‑refresh interval in seconds (default `6`, min `2`). |
-| `--no-color` | Disable ANSI colour (useful when piping `--once`). |
-| `--no-relaunch` | Don't reopen in Terminal when launched without a TTY. |
 | `--help`, `-h` | Show usage. |
+
+That's the whole flag surface — everything else is a **live** TUI control. Sort
+column, band filter and refresh interval are changed with keys while running (see
+[keyboard shortcuts](#keyboard-shortcuts)), and **colour is automatic**: on in a
+terminal, off when piped or redirected. Set `NO_COLOR` to force it off.
 
 ## Reading the table
 
@@ -175,8 +176,8 @@ wifiscan --help           # usage summary
 | **SNR** | Signal‑to‑noise ratio in dB — only shown for the channel your radio is tuned to (see [limitations](#known-macos-limitations)); `—` otherwise. |
 | **Sec** | Security: `Open`, `WEP`, `WPA`, `WPA2`, `WPA3`, or `WPA2/3` (transition). |
 
-**Signal colour key** (by dBm): green `≥ -60` · yellow `-60…-67` · orange
-`-67…-75` · red `< -75`.
+**Signal colour key** (by dBm): bright‑green `≥ -50` · green `-50…-60` · yellow
+`-60…-67` · orange `-67…-75` · red `< -75`.
 
 ## Keyboard shortcuts
 
@@ -231,30 +232,31 @@ Per band:
 
 ## JSON output
 
-`wifiscan --json` prints a pretty array, sorted by your `--sort` key. `noise` and
-`snr` are present only when macOS actually measured them (otherwise omitted):
+`wifiscan --json` prints a pretty array, sorted by signal power (strongest first);
+object keys are alphabetised. `noise` and `snr` are present only when macOS actually
+measured them (otherwise omitted):
 
 ```jsonc
 [
   {
-    "ssid": "home-router",
-    "channel": 6,
     "band": "2.4 GHz",
-    "widthMHz": 20,
+    "channel": 6,
+    "hidden": false,
     "rssi": -34,
     "security": "WPA2/3",
-    "hidden": false
+    "ssid": "home-router",
+    "widthMHz": 20
   },
   {
-    "ssid": "home-router-5G",
-    "channel": 161,
     "band": "5 GHz",
-    "widthMHz": 80,
-    "rssi": -45,
+    "channel": 161,
+    "hidden": false,
     "noise": -94,
-    "snr": 49,
+    "rssi": -45,
     "security": "WPA2/3",
-    "hidden": false
+    "snr": 49,
+    "ssid": "home-router-5G",
+    "widthMHz": 80
   }
 ]
 ```
@@ -276,18 +278,22 @@ This was the genuinely hard part. On recent macOS, CoreWLAN redacts SSIDs unless
    names **even when Location is authorized**. (This is why "wrap it in a GUI app"
    is the usual advice, and why Apple's own tools are unaffected.)
 
-So `wifiscan` runs the actual scan in a short‑lived **helper instance of itself
-launched via `open`**:
+So `wifiscan` runs the actual scan in a **persistent helper instance of itself
+launched via `open`** — a real LaunchServices app session:
 
 ```
-open -n -W -g -j wifiscan.app --args --scan-json <tmpfile>
+open -n -g -j wifiscan.app --args --scan-daemon <control-dir>
 ```
 
-`-n` new instance · `-W` wait · `-g` don't foreground · `-j` launch hidden. The
-helper engages Location, scans (names visible), writes JSON, and exits; the TUI
-reads it back. **No Apple Developer account and no special entitlement are
-required** — only the Location grant. The full investigation is in the commit
-history.
+`-n` new instance · `-g` don't foreground · `-j` launch hidden. The helper engages
+Location **once**, then stays alive and serves each scan request over a small
+atomic‑file protocol in `<control-dir>`, writing results back as JSON. The
+front‑end heart‑beats the helper, so it self‑exits if the TUI quits or crashes.
+Because the helper persists, refreshes after the first avoid both the process spawn
+and the Location settle and are near‑instant. (A short‑lived `--scan-json` one‑shot
+helper remains as a fallback.) **No Apple Developer account and no special
+entitlement are required** — only the Location grant. The full investigation is in
+the commit history.
 
 ## Architecture
 
@@ -295,21 +301,23 @@ history.
             you ── type `wifiscan` (or double-click the .app)
              │
              ▼
-   ┌──────────────────────┐   each refresh   ┌───────────────────────────┐
-   │  TUI front-end        │ ───────────────▶ │  helper: wifiscan          │
-   │  (your terminal)      │   open -n -W …   │  --scan-json  (via open)   │
-   │  render · keys · sort │ ◀─────────────── │  Location + CoreWLAN scan  │
-   └──────────────────────┘   JSON via tmp    └───────────────────────────┘
-                                                          │
-                                                          ▼
+   ┌──────────────────────┐   scan request   ┌───────────────────────────┐
+   │  TUI front-end        │ ───────────────▶ │  persistent helper         │
+   │  (your terminal)      │  (file protocol) │  --scan-daemon (via open)  │
+   │  render · keys · sort │ ◀─────────────── │  Location (once) + CoreWLAN │
+   └──────────────────────┘   JSON result     └───────────────────────────┘
+        launched once via `open`, kept alive          │
+        heartbeat → self-exits when the TUI quits      ▼
                                               CWWiFiClient.scanForNetworks
 ```
 
 - **Front‑end** (`wifiscan` in your terminal): raw‑mode ANSI TUI — rendering, input,
   sorting, the channel map and recommendations. It does **not** need Location.
-- **Helper** (`wifiscan --scan-json`, reached only via `open`): performs one
-  CoreWLAN scan as a LaunchServices app session so SSIDs are visible, and writes the
-  result as JSON.
+- **Helper** (`wifiscan --scan-daemon`, reached only via `open`): a long‑lived
+  LaunchServices app session that engages Location once and serves each scan over a
+  file protocol so SSIDs are visible. Subsequent scans skip both the process spawn
+  and the Location settle, so refreshes after the first are near‑instant. A
+  short‑lived `--scan-json` helper remains as a fallback.
 - **Double‑click**: when launched without a TTY (Finder / Spotlight / Dock), the app
   reopens itself in Terminal so the TUI has somewhere to draw.
 
@@ -320,7 +328,7 @@ history.
 | All SSIDs show `‹hidden›` | Location Services not enabled for **wifiscan**. Enable it in System Settings → Privacy & Security → Location Services, then rerun. Check with `wifiscan --diag`. |
 | SSIDs were working, broke after `make` | Ad‑hoc identity changed on rebuild → grant lost. Re‑enable **wifiscan** in Location Services, or use a [stable signing cert](#keep-the-grant-across-rebuilds-optional). |
 | `wifiscan --diag` shows `SSIDs visible: 0/N` | Same as above — permission. The metadata (power/channel) still works. |
-| First scan takes ~3 s | Expected — each scan launches the helper via `open` and lets Location settle. Subsequent refreshes run in the background. |
+| First scan takes a few seconds | Expected — the first scan launches the persistent helper and settles Location once. Subsequent refreshes reuse it and are near‑instant. |
 | Double‑click prompts "wifiscan wants to control Terminal" | One‑time macOS Automation prompt — click **OK**; it won't ask again. |
 | `Wi‑Fi is powered off` | Turn Wi‑Fi on; the radio must be up to scan. |
 | `command not found: wifiscan` | `~/.bin` isn't on your `PATH` — see [Install](#install). |
@@ -340,9 +348,11 @@ history.
 ## Project layout
 
 ```
-Sources/wifiscan/main.swift   the whole program — scan · channel analysis · TUI
+Sources/wifiscan/Core.swift   pure logic — channel plan · bonding · congestion · sorting · text layout
+Sources/wifiscan/main.swift   CoreWLAN/CoreLocation · TUI · out-of-process scan helper · entrypoint
+Tests/CoreTests.swift         dependency-free unit tests for Core (`make test`)
 Info.plist                    app-bundle metadata + Location-Services usage string
-Makefile                      `make` → signed wifiscan.app in ~/Applications + launcher
+Makefile                      `make` → signed wifiscan.app in ~/Applications + launcher; `make test`
 Package.swift                 SwiftPM manifest (for editors/tooling; `make` uses swiftc)
 Makefile.local                optional, git-ignored: machine-local SIGN identity
 ```
@@ -354,14 +364,18 @@ No third‑party dependencies — just the system **CoreWLAN**, **CoreLocation**
 
 ```sh
 make                       # build + sign + deploy
-swiftc Sources/wifiscan/main.swift -o /tmp/wifiscan \
+make test                  # run the core unit tests (no Xcode/XCTest needed — CLT only)
+swiftc Sources/wifiscan/Core.swift Sources/wifiscan/main.swift -o /tmp/wifiscan \
     -framework CoreWLAN -framework CoreLocation     # quick type-check / compile
 wifiscan --diag            # verify scanning + permission
 ```
 
-The program is a single file. Key pieces: `Scanner` (CoreWLAN wrapper), `ChannelPlan`
-/ `Analysis` (bonding model + congestion scoring), `ScanJSONHelper` / `scanViaHelper`
-(the out‑of‑process scan), and the raw‑mode TUI (`enterRaw`/`draw`/`runInteractive`).
+Two files: **`Core.swift`** holds the pure, framework‑free logic (channel plan,
+bonding model, congestion scoring, sorting, text layout) and is unit‑tested
+standalone via `make test`; **`main.swift`** holds `Scanner` (CoreWLAN wrapper),
+`HelperClient` / `ScanDaemon` (the persistent out‑of‑process scan, with a
+`--scan-json` one‑shot fallback), and the raw‑mode TUI (`enterRaw` / `draw` /
+`runInteractive`).
 
 ## License
 

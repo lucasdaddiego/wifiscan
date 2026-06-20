@@ -11,7 +11,10 @@
 -include Makefile.local
 
 BINARY      := wifiscan
-SRC         := Sources/wifiscan/main.swift
+# Core.swift = pure, framework-free logic (also compiled standalone by `make test`);
+# main.swift = CoreWLAN/CoreLocation, TUI, scan helper, entrypoint.
+SRC         := Sources/wifiscan/Core.swift Sources/wifiscan/main.swift
+TEST_SRC    := Sources/wifiscan/Core.swift Tests/CoreTests.swift
 PLIST       := Info.plist
 INSTALL_DIR := $(HOME)/.bin
 APP_DIR     := $(HOME)/Applications
@@ -33,7 +36,7 @@ RELEASE     := -O -Xlinker -x -Xlinker -dead_strip
 LSREGISTER  := /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 
 .DEFAULT_GOAL := deploy
-.PHONY: deploy clean
+.PHONY: deploy clean test
 
 deploy: ## Build wifiscan.app into ~/Applications + a `wifiscan` launcher on ~/.bin
 	@rm -rf "$(APP)"
@@ -50,6 +53,10 @@ deploy: ## Build wifiscan.app into ~/Applications + a `wifiscan` launcher on ~/.
 	@echo "  1. run \`$(BINARY)\` once  (registers it with Location Services)"
 	@echo "  2. System Settings → Privacy & Security → Location Services → enable 'wifiscan'"
 	@echo "  3. fully quit Terminal (⌘Q) and reopen, then run \`$(BINARY)\`"
+
+test: ## Build & run the dependency-free core unit tests (no Xcode/XCTest needed)
+	@swiftc -parse-as-library $(TEST_SRC) -o /tmp/wifiscan-tests
+	@/tmp/wifiscan-tests
 
 clean: ## Remove the app bundle and the launcher
 	rm -rf "$(APP)" "$(INSTALL_DIR)/$(BINARY)"

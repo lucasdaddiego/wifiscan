@@ -23,10 +23,10 @@
     <true/>
     <key>LSMinimumSystemVersion</key>
     <string>12.0</string>
-    <!-- macOS gates Wi-Fi SSIDs/scan behind Location Services; this is the prompt text. -->
+    <!-- macOS gates Wi-Fi SSIDs/scan behind Location Services; this is the prompt text.
+         requestWhenInUseAuthorization() uses the WhenInUse key; the legacy
+         NSLocationUsageDescription is deprecated and not needed. -->
     <key>NSLocationWhenInUseUsageDescription</key>
-    <string>wifiscan reads nearby Wi-Fi network names and signal levels, which macOS gates behind Location Services.</string>
-    <key>NSLocationUsageDescription</key>
     <string>wifiscan reads nearby Wi-Fi network names and signal levels, which macOS gates behind Location Services.</string>
 </dict>
 </plist>

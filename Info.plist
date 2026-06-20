@@ -3,13 +3,27 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleIdentifier</key>
-    <string>local.wifiscan</string>
+    <string>com.lucasdaddiego.wifiscan</string>
     <key>CFBundleName</key>
+    <string>wifiscan</string>
+    <key>CFBundleDisplayName</key>
     <string>wifiscan</string>
     <key>CFBundleExecutable</key>
     <string>wifiscan</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
     <key>CFBundleShortVersionString</key>
     <string>1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <!-- Accessory app: no Dock icon when run, but can still request Location. -->
+    <key>LSUIElement</key>
+    <true/>
+    <key>LSMinimumSystemVersion</key>
+    <string>12.0</string>
+    <!-- macOS gates Wi-Fi SSIDs/scan behind Location Services; this is the prompt text. -->
     <key>NSLocationWhenInUseUsageDescription</key>
     <string>wifiscan reads nearby Wi-Fi network names and signal levels, which macOS gates behind Location Services.</string>
     <key>NSLocationUsageDescription</key>

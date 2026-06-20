@@ -1,29 +1,55 @@
 # wifiscan — terminal WiFi survey & channel planner (Swift / CoreWLAN).
-# `make` builds a stripped, signed release binary into ~/.bin.
+# `make` builds wifiscan.app into ~/Applications and a `wifiscan` launcher on PATH.
+#
+# Why an .app bundle? macOS gates Wi-Fi SSIDs behind Location Services and only
+# grants it to an app with its own identity. A bare CLI has none, so its request
+# can't be attributed to the terminal reliably. Running the binary *inside* a
+# signed .app gives the process the bundle's identity, so "wifiscan" appears in
+# Location Services on its own — independent of which terminal you launch it from.
+
+# Optional machine-local overrides (git-ignored) — e.g. SIGN := <your cert>.
+-include Makefile.local
 
 BINARY      := wifiscan
 SRC         := Sources/wifiscan/main.swift
 PLIST       := Info.plist
 INSTALL_DIR := $(HOME)/.bin
-SIGN_ID     := local.wifiscan
+APP_DIR     := $(HOME)/Applications
+APP         := $(APP_DIR)/$(BINARY).app
+EXE         := $(APP)/Contents/MacOS/$(BINARY)
+BUNDLE_ID   := com.lucasdaddiego.wifiscan
+# Signing identity. Ad-hoc ("-") by default — but ad-hoc has no stable identity, so
+# macOS ties the Location grant to the exact build and forgets it on every rebuild.
+# For a grant that survives rebuilds, create a self-signed "Code Signing" certificate
+# once (Keychain Access → Certificate Assistant → Create a Certificate, type "Code
+# Signing"), then build with:  make SIGN="Your Cert Name"
+SIGN        ?= -
 
 FRAMEWORKS  := -framework CoreWLAN -framework CoreLocation
-# Embed Info.plist (Location-Services usage string) into the binary's __TEXT.
-PLIST_LD    := -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker $(PLIST)
 # Release: optimise (-O), strip local symbols (-x), drop dead code (-dead_strip).
-# No -g, so zero debug info is emitted. Stripping happens at link time, before
-# signing, so the ad-hoc signature stays valid.
+# No -g, so zero debug info. Stripping is at link time, before signing.
 RELEASE     := -O -Xlinker -x -Xlinker -dead_strip
+
+LSREGISTER  := /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 
 .DEFAULT_GOAL := deploy
 .PHONY: deploy clean
 
-deploy: ## Build a stripped, signed release binary into ~/.bin
-	@mkdir -p $(INSTALL_DIR)
-	rm -f "$(INSTALL_DIR)/$(BINARY)"
-	swiftc $(RELEASE) $(SRC) -o "$(INSTALL_DIR)/$(BINARY)" $(FRAMEWORKS) $(PLIST_LD)
-	codesign --force --sign - --identifier $(SIGN_ID) "$(INSTALL_DIR)/$(BINARY)"
-	@echo "deployed $(INSTALL_DIR)/$(BINARY) ($$(du -h "$(INSTALL_DIR)/$(BINARY)" | cut -f1))"
+deploy: ## Build wifiscan.app into ~/Applications + a `wifiscan` launcher on ~/.bin
+	@rm -rf "$(APP)"
+	@mkdir -p "$(APP)/Contents/MacOS" "$(INSTALL_DIR)"
+	cp $(PLIST) "$(APP)/Contents/Info.plist"
+	swiftc $(RELEASE) $(SRC) -o "$(EXE)" $(FRAMEWORKS)
+	codesign --force --sign $(SIGN) --identifier $(BUNDLE_ID) "$(APP)"
+	ln -sf "$(EXE)" "$(INSTALL_DIR)/$(BINARY)"
+	-$(LSREGISTER) -f "$(APP)"
+	@echo "deployed $(APP) ($$(du -sh "$(APP)" | cut -f1))"
+	@echo "         launcher: $(INSTALL_DIR)/$(BINARY) -> in-bundle binary"
+	@echo
+	@echo "one-time permission:"
+	@echo "  1. run \`$(BINARY)\` once  (registers it with Location Services)"
+	@echo "  2. System Settings → Privacy & Security → Location Services → enable 'wifiscan'"
+	@echo "  3. fully quit Terminal (⌘Q) and reopen, then run \`$(BINARY)\`"
 
-clean: ## Remove the deployed binary
-	rm -f "$(INSTALL_DIR)/$(BINARY)"
+clean: ## Remove the app bundle and the launcher
+	rm -rf "$(APP)" "$(INSTALL_DIR)/$(BINARY)"

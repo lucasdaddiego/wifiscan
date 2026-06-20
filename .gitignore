@@ -3,3 +3,6 @@
 .build/
 _CodeSignature/
 *.dSYM/
+
+# Machine-local Make overrides (e.g. a personal code-signing identity)
+Makefile.local

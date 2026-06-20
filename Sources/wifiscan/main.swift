@@ -217,51 +217,6 @@ final class Scanner {
     }
 }
 
-// MARK: - Location authorization
-//
-// CoreWLAN masks SSIDs unless the process is authorized for Location Services.
-// Touching CoreLocation registers us with locationd and attributes the grant to
-// the host terminal (which must itself be enabled in System Settings → Privacy &
-// Security → Location Services).
-
-final class LocationPrimer: NSObject, CLLocationManagerDelegate {
-    private let mgr = CLLocationManager()
-    private(set) var status: CLAuthorizationStatus = .notDetermined
-
-    override init() {
-        super.init()
-        mgr.delegate = self
-        status = mgr.authorizationStatus
-    }
-
-    func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
-        status = manager.authorizationStatus
-    }
-
-    var authorized: Bool { status == .authorizedAlways || status == .authorized }
-
-    var statusText: String {
-        switch status {
-        case .authorizedAlways, .authorized: return "authorized"
-        case .denied: return "denied"
-        case .restricted: return "restricted"
-        case .notDetermined: return "not-determined"
-        @unknown default: return "unknown"
-        }
-    }
-
-    /// Request authorization and pump the run loop briefly so the status resolves.
-    func prime(timeout: TimeInterval = 2.5) {
-        mgr.requestWhenInUseAuthorization()
-        mgr.startUpdatingLocation()
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline && !authorized {
-            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.1))
-        }
-        mgr.stopUpdatingLocation()
-    }
-}
-
 // MARK: - Congestion analysis
 
 struct ChannelLoad {
@@ -518,10 +473,11 @@ final class App {
         lock.unlock()
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
-            let result = self.scanner.scan()
+            let result = scanViaHelper()   // scan in an open-launched helper so SSIDs are visible
             self.lock.lock()
             if result.error == nil { self.nets = result.nets }
             self.scanError = result.error
+            if let s = result.status { self.locationStatus = s }
             self.lastScan = Date()
             self.scanning = false
             self.scanCount += 1
@@ -688,8 +644,8 @@ func draw(_ app: App) {
     }
     let hidden = snap.nets.filter { $0.hidden }.count
     if !snap.nets.isEmpty && hidden == snap.nets.count {
-        lines.append(Ansi.fg256("⚠ all SSIDs hidden — this terminal lacks Location Services permission.", 208))
-        lines.append(Ansi.dim("  System Settings → Privacy & Security → Location Services → enable for \(terminalAppName()), then relaunch."))
+        lines.append(Ansi.fg256("⚠ all SSIDs hidden — Location Services isn't active for wifiscan.", 208))
+        lines.append(Ansi.dim("  Enable 'wifiscan' in System Settings → Privacy & Security → Location Services, then rerun."))
     }
 
     // Body
@@ -733,49 +689,32 @@ func footerLines() -> [String] {
     return [Ansi.dim(keys)]
 }
 
-/// Best-effort name of the host terminal app, for the permission hint.
-func terminalAppName() -> String {
-    let env = ProcessInfo.processInfo.environment
-    if let bundle = env["__CFBundleIdentifier"] {
-        if bundle.contains("iTerm") { return "iTerm" }
-        if bundle.contains("Terminal") { return "Terminal" }
-        if bundle.contains("vscode") || bundle.contains("VSCode") { return "Code" }
-        if bundle.contains("ghostty") { return "Ghostty" }
-    }
-    if env["TERM_PROGRAM"] == "iTerm.app" { return "iTerm" }
-    if env["TERM_PROGRAM"] == "Apple_Terminal" { return "Terminal" }
-    if env["TERM_PROGRAM"] == "vscode" { return "Code" }
-    if env["TERM_PROGRAM"] == "ghostty" { return "Ghostty" }
-    return "your terminal app"
-}
-
 // MARK: - Diagnostics
 
 func runDiag(app: App) {
     let s = app.scanner
-    let res = s.scan()
+    let res = scanViaHelper()   // scan via the open-launched helper, like the TUI
     let named = res.nets.filter { !$0.hidden }.count
     print("wifiscan diagnostics")
     print("  interface          : \(s.interfaceName)")
     print("  power on           : \(s.powerOn)")
     print("  connected ssid     : \(s.currentSSID ?? "—")")
-    print("  location status    : \(app.locationStatus)")
+    print("  helper location    : \(res.status ?? "unknown")")
     print("  scan error         : \(res.error ?? "none")")
     print("  networks found     : \(res.nets.count)")
     print("  SSIDs visible      : \(named)/\(res.nets.count)")
-    print("  host terminal      : \(terminalAppName())")
+    print("  app bundle         : \(appBundlePath())")
     if res.nets.count > 0 && named == 0 {
         print("")
-        print("  ⚠ SSIDs are masked. Enable Location Services for \(terminalAppName()):")
-        print("    System Settings → Privacy & Security → Location Services → \(terminalAppName()) → on")
-        print("    (then fully quit and relaunch the terminal).")
+        print("  ⚠ SSIDs are masked — Location Services isn't authorized for wifiscan.")
+        print("    System Settings → Privacy & Security → Location Services → enable 'wifiscan'.")
     }
 }
 
 // MARK: - One-shot (non-interactive) mode
 
 func runOnce(app: App, json: Bool) {
-    let result = app.scanner.scan()
+    let result = scanViaHelper()
     let nets = sortNets(result.nets, by: app.sortKey, ascending: app.ascending)
     if json {
         struct Out: Encodable {
@@ -795,7 +734,7 @@ func runOnce(app: App, json: Bool) {
     if let e = result.error { print(Ansi.fg256("scan error: \(e)", 196)) }
     let hidden = nets.filter { $0.hidden }.count
     if !nets.isEmpty && hidden == nets.count {
-        print(Ansi.fg256("⚠ all SSIDs hidden — enable Location Services for \(terminalAppName()) (System Settings → Privacy & Security → Location Services), then relaunch.", 208))
+        print(Ansi.fg256("⚠ all SSIDs hidden — enable 'wifiscan' in System Settings → Privacy & Security → Location Services.", 208))
     }
     print("")
     for line in renderTable(nets, cols: termSize().cols) { print(line) }
@@ -805,6 +744,119 @@ func runOnce(app: App, json: Bool) {
     for line in renderRecommendations(nets) { print(line) }
     print("")
     print(Ansi.dim("noise/SNR are only reported by macOS for the channel the radio is tuned to; ‹—› elsewhere is expected."))
+}
+
+// MARK: - Out-of-process scan helper
+//
+// macOS 26 redacts Wi-Fi SSIDs for any process that isn't launched as a real app
+// session: a CLI spawned by a shell gets masked names even when Location Services
+// is authorized. The fix (found empirically) is to perform each scan in a
+// short-lived helper instance of ourselves launched via LaunchServices (`open`),
+// which counts as an app session and sees real SSIDs, then hand the results back
+// as JSON over a temp file.
+
+struct ScanRecord: Codable {
+    let ssid: String, rssi: Int, noise: Int, channel: Int
+    let band: Int, widthMHz: Int, security: String, hidden: Bool
+}
+struct ScanFile: Codable {
+    let error: String?
+    let status: String?
+    let nets: [ScanRecord]
+}
+private func record(_ b: BSS) -> ScanRecord {
+    ScanRecord(ssid: b.ssid, rssi: b.rssi, noise: b.noise, channel: b.channel,
+               band: b.band.rawValue, widthMHz: b.widthMHz, security: b.security, hidden: b.hidden)
+}
+private func bss(_ r: ScanRecord) -> BSS {
+    BSS(ssid: r.ssid, rssi: r.rssi, noise: r.noise, channel: r.channel,
+        band: Band.from(r.band), widthMHz: r.widthMHz, security: r.security, hidden: r.hidden)
+}
+
+/// Helper mode (reached only via `open`): briefly engage Location, scan, write JSON, exit.
+final class ScanJSONHelper: NSObject, CLLocationManagerDelegate {
+    private let mgr = CLLocationManager()
+    private let path: String
+    init(path: String) { self.path = path; super.init(); mgr.delegate = self }
+    func go() {
+        mgr.requestWhenInUseAuthorization()
+        mgr.startUpdatingLocation()
+        Timer.scheduledTimer(withTimeInterval: 1.0, repeats: false) { [self] _ in
+            let r = Scanner().scan()
+            let status: String
+            switch mgr.authorizationStatus {
+            case .authorizedAlways, .authorized: status = "authorized"
+            case .denied: status = "denied"
+            case .restricted: status = "restricted"
+            case .notDetermined: status = "not-determined"
+            @unknown default: status = "unknown"
+            }
+            let out = ScanFile(error: r.error, status: status, nets: r.nets.map(record))
+            if let data = try? JSONEncoder().encode(out) {
+                try? data.write(to: URL(fileURLWithPath: path))
+            }
+            exit(0)
+        }
+        RunLoop.current.run()
+    }
+}
+
+/// Resolve the real .app bundle path. Bundle.main is unreliable when we're invoked
+/// through the ~/.bin/wifiscan symlink (it reports the symlink's directory), so we
+/// resolve the actual executable and walk up to the enclosing ".app".
+func appBundlePath() -> String {
+    var size: UInt32 = 4096
+    var buf = [CChar](repeating: 0, count: Int(size))
+    var exe = Bundle.main.executablePath ?? (CommandLine.arguments.first ?? "")
+    if _NSGetExecutablePath(&buf, &size) == 0 { exe = String(cString: buf) }
+    var u = URL(fileURLWithPath: exe).resolvingSymlinksInPath()   // follow the symlink into the bundle
+    while u.pathExtension != "app" && u.path != "/" {
+        u = u.deletingLastPathComponent()
+    }
+    return u.pathExtension == "app" ? u.path : Bundle.main.bundlePath
+}
+
+/// Front-end side: run one scan in an `open`-launched helper and read it back.
+func scanViaHelper() -> (nets: [BSS], error: String?, status: String?) {
+    let tmp = NSTemporaryDirectory() + "wifiscan-\(getpid()).json"
+    try? FileManager.default.removeItem(atPath: tmp)
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+    // -n new instance · -W wait for exit · -g don't foreground · -j launch hidden
+    p.arguments = ["-n", "-W", "-g", "-j", appBundlePath(), "--args", "--scan-json", tmp]
+    do { try p.run() } catch {
+        return ([], "could not launch scan helper: \(error.localizedDescription)", nil)
+    }
+    p.waitUntilExit()
+    guard let data = FileManager.default.contents(atPath: tmp) else {
+        return ([], "scan helper produced no output", nil)
+    }
+    try? FileManager.default.removeItem(atPath: tmp)
+    guard let f = try? JSONDecoder().decode(ScanFile.self, from: data) else {
+        return ([], "could not parse scan helper output", nil)
+    }
+    return (f.nets.map(bss), f.error, f.status)
+}
+
+// MARK: - Relaunch in Terminal (for Finder/Spotlight/Dock launches)
+
+/// Open Terminal and exec this binary there, so a double-click "opens the app".
+/// `exec` replaces Terminal's shell with wifiscan, so quitting the TUI closes the
+/// window. The in-bundle binary keeps the app's code identity, so Location works.
+func relaunchInTerminal() {
+    let exe = Bundle.main.executablePath ?? CommandLine.arguments.first ?? "wifiscan"
+    let safe = exe.replacingOccurrences(of: "'", with: "'\\''")   // shell single-quote escape
+    let script = """
+    tell application "Terminal"
+        activate
+        do script "clear; exec '\(safe)'"
+    end tell
+    """
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+    p.arguments = ["-e", script]
+    try? p.run()
+    p.waitUntilExit()
 }
 
 // MARK: - Entry
@@ -829,7 +881,6 @@ func main() {
           wifiscan --json          one scan, emit JSON
           wifiscan --diag          print scan/permission diagnostics
           wifiscan --no-color      disable ANSI colour
-          wifiscan --no-location   skip the CoreLocation authorization request
           wifiscan --interval N     auto-refresh seconds (default 6)
           wifiscan --sort KEY       power|snr|channel|name|band|width|security
 
@@ -840,16 +891,24 @@ func main() {
         """)
         return
     }
+    // Helper mode: reached only when relaunched via `open` to perform one scan.
+    if let i = args.firstIndex(of: "--scan-json") {
+        let out = i + 1 < args.count ? args[i+1] : NSTemporaryDirectory() + "wifiscan-scan.json"
+        ScanJSONHelper(path: out).go()
+        return
+    }
+    // If launched without a terminal (double-clicked in Finder / Spotlight / Dock),
+    // reopen inside Terminal so the TUI has somewhere to draw. One-shot/pipe modes
+    // are exempt — they're meant to run headless.
+    let interactive = !(args.contains("--once") || args.contains("--json")
+        || args.contains("--diag") || args.contains("--no-relaunch"))
+    if interactive && isatty(STDIN_FILENO) == 0 {
+        relaunchInTerminal()
+        return
+    }
     if !app.scanner.powerOn {
         FileHandle.standardError.write(Data("Wi-Fi is powered off (interface \(app.scanner.interfaceName)). Turn it on and retry.\n".utf8))
         exit(1)
-    }
-    if !args.contains("--no-location") {
-        let primer = LocationPrimer()
-        primer.prime()
-        app.locationStatus = primer.statusText
-    } else {
-        app.locationStatus = "skipped"
     }
     if args.contains("--diag") { runDiag(app: app); return }
     if args.contains("--json") { runOnce(app: app, json: true); return }

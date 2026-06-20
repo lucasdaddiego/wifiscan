@@ -1,8 +1,8 @@
 # wifiscan
 
 A terminal **WiFi survey & channel planner** for modern macOS, driven straight off
-**CoreWLAN**. One scan, one screen: every nearby network with its **power, SNR,
-channel, band, width and security** — sortable on any column, with a live
+**CoreWLAN**. One scan, one screen: every nearby network with its **name, power,
+SNR, channel, band, width and security** — sortable on any column, with a live
 **channel-congestion map** and a **"cleanest channel" recommendation per band** so
 you can pick the best channel for each of your access points. A single
 self-contained Swift binary, zero third-party dependencies.
@@ -40,29 +40,37 @@ so it works on the latest macOS with **no Homebrew, no Python, no `pip`**.
 ## Build & install
 
 ```sh
-make            # compile a stripped, signed release into ~/.bin, then run `wifiscan`
-make clean      # remove it
+make            # build wifiscan.app into ~/Applications + a `wifiscan` launcher on ~/.bin
+make clean      # remove both
 ```
 
-`make` optimises (`-O`), strips all local symbols and dead code (no debug info),
-embeds an `Info.plist` and ad-hoc code-signs the binary — the signature + plist are
-what let macOS reveal SSIDs. Make sure `~/.bin` is on your `PATH`.
+`make` compiles an optimised, fully-stripped binary (no debug info) into a signed
+`wifiscan.app` bundle and symlinks a `wifiscan` command into `~/.bin`. Make sure
+`~/.bin` is on your `PATH`. You can then run `wifiscan` from any terminal, or
+**double-click `wifiscan.app`** (it reopens itself in Terminal).
 
 > Requirements: macOS (built & tested on **26 / Apple Silicon**) and the Xcode
 > Command Line Tools (`xcode-select --install`) for `swiftc`.
 
 ## ⚠️ One-time permission
 
-macOS hides Wi-Fi **SSIDs** unless the app reading them has **Location Services**
-permission. `wifiscan` requests it on launch, but you must allow your terminal once:
+macOS hides Wi-Fi **SSIDs** unless the scanning app has **Location Services**
+permission. `wifiscan` ships as a signed `.app`, so it appears in that list under
+**its own name**:
 
-1. Run `wifiscan --diag`. If it reports *"SSIDs visible: 0/N"*, permission is missing.
-2. **System Settings → Privacy & Security → Location Services** → enable the toggle
-   for **your terminal app** (Terminal, iTerm, Ghostty, VS Code, …).
-3. **Fully quit** the terminal (⌘Q) and reopen it, then run `wifiscan` again.
+1. Run `wifiscan` (or `wifiscan --diag`) once.
+2. **System Settings → Privacy & Security → Location Services** → enable **wifiscan**.
+3. Run `wifiscan` again — `wifiscan --diag` should report **`SSIDs visible: N/N`**.
 
-Signal, channel, band, width and security all work **without** this — only the
+Power, channel, band, width and security all work **without** this — only the
 network *names* are gated.
+
+> **Stable permission across rebuilds (optional).** Ad-hoc signing changes the
+> app's identity on every `make`, so macOS forgets the grant. To make it stick,
+> create a self-signed **Code Signing** certificate once (Keychain Access →
+> Certificate Assistant → Create a Certificate, type *Code Signing*) and drop a
+> `Makefile.local` with `SIGN := <cert name>` (git-ignored). Then grant once and
+> every future build keeps it.
 
 ## Usage
 
@@ -119,6 +127,23 @@ actually lands on it — so you can see congestion at a glance:
   **non-DFS** channel plus the cleanest **DFS** option (marked `*`; cleaner, but can
   drop out on radar detection). **6 GHz** uses **PSC** channels.
 
+## How it reveals SSIDs (the macOS-26 catch)
+
+This was the hard part. On recent macOS, CoreWLAN redacts SSIDs unless **two**
+conditions hold:
+
+1. The app is **authorized for Location Services** (the one-time grant above), and
+2. The scan runs in a process launched as a real **app session** (via
+   LaunchServices) — *not* a binary spawned directly by a shell. A shell-child
+   process gets masked names even when Location is authorized.
+
+So `wifiscan` runs the actual scan in a short-lived **helper instance of itself
+launched via `open`** (`open -n -W -g -j wifiscan.app --args --scan-json …`), which
+counts as an app session and sees real names, then reads the result back as JSON.
+The TUI you interact with is the front-end; each refresh delegates one scan to the
+helper. This needs no Apple Developer account and no special entitlement — just the
+Location grant. (See the commit history for the full investigation.)
+
 ## Known macOS limitations
 
 - **SNR shows `—` for most networks.** macOS only measures the noise floor on the
@@ -128,16 +153,15 @@ actually lands on it — so you can see congestion at a glance:
 - **No BSSID or country code.** Both are gated behind Apple-*private* entitlements
   (`com.apple.private.corewifi.bssid` / `.countrycode`) that only `airportd` and
   Apple's own tools (Wireless Diagnostics, `wdutil`) carry — a third-party binary
-  always gets `nil`, so `wifiscan` doesn't model them. (`airportd` is the root
-  daemon every CoreWLAN client talks to over XPC; it unmasks data per the caller's
-  entitlements. Not needed for channel planning.)
+  always gets `nil`, so `wifiscan` doesn't model them. Not needed for channel
+  planning.
 
 ## Layout
 
 ```
 Sources/wifiscan/main.swift   the whole program — scan · channel analysis · TUI
-Info.plist                    embedded Location-Services usage string
-Makefile                      `make` → stripped, signed binary into ~/.bin
+Info.plist                    app-bundle metadata + Location-Services usage string
+Makefile                      `make` → signed wifiscan.app in ~/Applications + launcher
 Package.swift                 SwiftPM manifest (for editors/tooling; `make` uses swiftc)
 ```
 

@@ -1,0 +1,5 @@
+# Build artifacts (the release binary is deployed to ~/.bin, never committed)
+/wifiscan
+.build/
+_CodeSignature/
+*.dSYM/

@@ -46,7 +46,7 @@ struct BSS {
     }
 }
 
-enum Band: Int, CaseIterable {
+enum Band: Int {
     case unknown = 0, ghz24 = 1, ghz5 = 2, ghz6 = 3
 
     var label: String {
@@ -189,7 +189,7 @@ enum Analysis {
 
 // MARK: - Sorting
 
-enum SortKey: String {
+enum SortKey {
     case power, snr, channel, name, band, width, security
     var label: String {
         switch self {

@@ -83,7 +83,6 @@ enum Ansi {
     }
     static func bold(_ s: String) -> String { wrap(s, "1") }
     static func dim(_ s: String) -> String { wrap(s, "2") }
-    static func inverse(_ s: String) -> String { wrap(s, "7") }
     static func fg256(_ s: String, _ c: Int) -> String { wrap(s, "38;5;\(c)") }
     static func bg256(_ s: String, _ c: Int) -> String { wrap(s, "48;5;\(c)") }
 
@@ -100,10 +99,37 @@ enum Ansi {
     }
 }
 
+/// Named 256-colour palette for UI chrome. (Signal-quality colours live in
+/// signalColorCode; channel-map congestion colours in loadColor.)
+private enum Pal {
+    static let badgeFg = 231, badgeBg = 25   // "wifiscan" badge
+    static let label = 244                   // dim field labels & minor marks (DFS, hidden)
+    static let value = 252                   // field values (iface, SSID, …)
+    static let text = 250                    // neutral text (table header, rec tags)
+    static let heading = 39                  // channel-map band headings
+    static let accent = 47                   // recommendations heading / authorized
+    static let best = 46                     // highlighted cleanest channel
+    static let warn = 208                    // permission warning / not-authorized
+    static let error = 196                   // scan errors
+    static let scanning = 226                // scanning spinner
+}
+
+/// Channel-map bar colour by congestion fraction (0 = quiet → 1 = busiest channel
+/// in the band), so the bar's colour and length tell the same story.
+private func loadColor(_ frac: Double) -> Int {
+    switch frac {
+    case ..<0.20: return 46     // green — quiet
+    case ..<0.45: return 82
+    case ..<0.70: return 226    // yellow
+    case ..<0.88: return 208    // orange
+    default:      return 196    // red — most congested
+    }
+}
+
 /// Clip a possibly-ANSI-coloured string to `cols` visible terminal cells,
 /// copying escape sequences verbatim and re-appending a reset if truncated so
 /// colour can't bleed past the cut.
-func clipAnsi(_ s: String, _ cols: Int) -> String {
+private func clipAnsi(_ s: String, _ cols: Int) -> String {
     if cols <= 0 { return "" }
     var out = "", width = 0, truncated = false
     var i = s.startIndex
@@ -149,7 +175,7 @@ func termSize() -> Layout {
 
 func bandFilterLabel(_ b: Band?) -> String { b?.longLabel ?? "All bands" }
 
-func renderTable(_ nets: [BSS], cols: Int) -> [String] {
+private func renderTable(_ nets: [BSS], cols: Int) -> [String] {
     // Column widths (responsive-ish; SSID flexes).
     let wChan = 7, wBand = 5, wWidth = 6, wSig = 6, wBar = 11, wSnr = 5, wSec = 7
     let fixed = wChan + wBand + wWidth + wSig + wBar + wSnr + wSec + 7 // gaps
@@ -161,12 +187,12 @@ func renderTable(_ nets: [BSS], cols: Int) -> [String] {
         padLeft("Width", wWidth), padLeft("dBm", wSig), padTo("Signal", wBar),
         padLeft("SNR", wSnr), padTo("Sec", wSec),
     ].joined(separator: " ")
-    out.append(Ansi.bold(Ansi.fg256(header, 250)))
+    out.append(Ansi.bold(Ansi.fg256(header, Pal.text)))
 
     for n in nets {
         let snrStr = n.snr.map { "\($0)" } ?? "—"
         let widthStr = n.widthMHz > 0 ? "\(n.widthMHz)" : "—"
-        let ssid = Ansi.fg256(padTo(n.ssid, wSSID), n.hidden ? 244 : 252)
+        let ssid = Ansi.fg256(padTo(n.ssid, wSSID), n.hidden ? Pal.label : Pal.value)
         let chan = padLeft("\(n.channel)", wChan)
         let band = padTo(n.band.label, wBand)
         let dbm = Ansi.fg256(padLeft("\(n.rssi)", wSig), Ansi.signalColor(n.rssi))
@@ -183,7 +209,7 @@ func renderTable(_ nets: [BSS], cols: Int) -> [String] {
     return out
 }
 
-func renderGraph(_ nets: [BSS], cols: Int) -> [String] {
+private func renderGraph(_ nets: [BSS], cols: Int) -> [String] {
     var out: [String] = []
     let bands: [Band] = [.ghz24, .ghz5, .ghz6]
     var firstBand = true
@@ -192,29 +218,32 @@ func renderGraph(_ nets: [BSS], cols: Int) -> [String] {
         if inBand.isEmpty { continue }
         if !firstBand { out.append("") }      // separator between bands, none before the first
         firstBand = false
-        out.append(Ansi.bold(Ansi.fg256("▎ \(band.longLabel)  (\(inBand.count) networks)", 39)))
+        out.append(Ansi.bold(Ansi.fg256("▎ \(band.longLabel)  (\(inBand.count) networks)", Pal.heading)))
 
         // Occupancy per active channel, weighted by overlapping energy.
         let activeChans = Set(inBand.map { $0.channel }).sorted()
         let loads = Analysis.loads(nets, band: band, candidates: activeChans)
         let maxW = max(loads.map { $0.weighted }.max() ?? 1, 1e-9)
         for load in loads.sorted(by: { $0.channel < $1.channel }) {
-            let barLen = Int((load.weighted / maxW) * Double(max(0, min(cols - 28, 40))))
+            let frac = load.weighted / maxW
+            let barLen = Int(frac * Double(max(0, min(cols - 28, 40))))
             let bar = String(repeating: "█", count: max(load.weighted > 0 ? 1 : 0, barLen))
-            let dfs = (band == .ghz5 && ChannelPlan.isDFS(load.channel)) ? Ansi.fg256(" DFS", 244) : ""
+            let dfs = (band == .ghz5 && ChannelPlan.isDFS(load.channel)) ? Ansi.fg256(" DFS", Pal.label) : ""
             let label = padLeft("ch \(load.channel)", 7)
             let cnt = padLeft("\(load.apCount)ap", 5)
             let strongest = padLeft(load.apCount > 0 ? "\(load.strongest)dBm" : "—", 8)
-            let colored = Ansi.fg256(bar, Ansi.signalColor(load.strongest))
+            // Colour by congestion (same metric as the bar's length), so a long red
+            // bar reliably means "most congested" rather than "has one loud AP".
+            let colored = Ansi.fg256(bar, loadColor(frac))
             out.append("  \(label) \(cnt) \(strongest)  \(colored)\(dfs)")
         }
     }
     return out
 }
 
-func renderRecommendations(_ nets: [BSS]) -> [String] {
+private func renderRecommendations(_ nets: [BSS]) -> [String] {
     var out: [String] = []
-    out.append(Ansi.bold(Ansi.fg256("Recommended clean channels", 47)))
+    out.append(Ansi.bold(Ansi.fg256("Recommended clean channels", Pal.accent)))
 
     func fmt(_ recs: [ChannelLoad], band: Band) -> String {
         guard let best = recs.first else { return Ansi.dim("—") }
@@ -223,7 +252,7 @@ func renderRecommendations(_ nets: [BSS]) -> [String] {
         return recs.prefix(3).map { r -> String in
             let dfs = (band == .ghz5 && ChannelPlan.isDFS(r.channel)) ? "*" : ""
             let tag = "ch \(r.channel)\(dfs) (\(r.apCount)ap)"
-            return (!allClear && r.channel == best.channel) ? Ansi.bold(Ansi.fg256(tag, 46)) : Ansi.fg256(tag, 250)
+            return (!allClear && r.channel == best.channel) ? Ansi.bold(Ansi.fg256(tag, Pal.best)) : Ansi.fg256(tag, Pal.text)
         }.joined(separator: "  ")
     }
     func row(_ label: String, _ body: String, _ note: String) {
@@ -262,6 +291,7 @@ final class App {
     var locationStatus = "unknown"
     var ifaceName = "—"            // cached so draw() never calls CoreWLAN per frame
     var connSSID: String?
+    var generation = 0             // bumped on every visible state change; the loop draws only when it advances
 
     // --- UI state (main-thread-confined; not locked) ---
     var sortKey: SortKey = .power
@@ -290,6 +320,7 @@ final class App {
         lock.lock()
         if scanning { lock.unlock(); return false }
         scanning = true
+        generation += 1          // surface the scanning spinner
         lock.unlock()
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
@@ -307,6 +338,7 @@ final class App {
             self.connSSID = conn
             self.lastScan = Date()
             self.scanCount += 1
+            self.generation += 1
             self.lock.unlock()
         }
         return true
@@ -318,6 +350,11 @@ final class App {
         return (nets, scanError, lastScan, scanning, scanCount, ifaceName, connSSID, locationStatus)
     }
 
+    /// Bump the redraw generation under the lock (called on the main thread on input).
+    func markDirty() { lock.lock(); generation += 1; lock.unlock() }
+    /// Read the redraw generation under the lock.
+    func readGeneration() -> Int { lock.lock(); defer { lock.unlock() }; return generation }
+
     func visibleNets(_ all: [BSS]) -> [BSS] {
         let filtered = bandFilter == nil ? all : all.filter { $0.band == bandFilter }
         return sortNets(filtered, by: sortKey, ascending: ascending)
@@ -326,15 +363,15 @@ final class App {
 
 // MARK: - Terminal raw mode
 
-var savedTermios = termios()
-var rawActive: sig_atomic_t = 0
+private var savedTermios = termios()
+private var rawActive: sig_atomic_t = 0
 
 private func writeRaw(_ s: String) {
     var bytes = Array(s.utf8)
     _ = write(STDOUT_FILENO, &bytes, bytes.count)
 }
 
-func enterRaw() {
+private func enterRaw() {
     tcgetattr(STDIN_FILENO, &savedTermios)
     rawActive = 1   // set first, so a signal arriving mid-setup still restores fully
     var raw = savedTermios
@@ -355,14 +392,14 @@ func enterRaw() {
 /// Async-signal-safe: uses only write() and tcsetattr() (both on the POSIX
 /// async-signal-safe list) — never stdio — so it is safe to call from a signal
 /// handler as well as the normal exit path. Idempotent via rawActive.
-func leaveRaw() {
+private func leaveRaw() {
     guard rawActive != 0 else { return }
     rawActive = 0
     writeRaw("\u{1B}[?25h\u{1B}[?1049l")   // show cursor + main screen
     tcsetattr(STDIN_FILENO, TCSANOW, &savedTermios)
 }
 
-func readKey() -> Character? {
+private func readKey() -> Character? {
     var buf = [UInt8](repeating: 0, count: 1)
     let n = read(STDIN_FILENO, &buf, 1)
     guard n == 1 else { return nil }
@@ -397,6 +434,7 @@ func runInteractive(app: App) {
     app.triggerScan()
     var lastAuto = Date()
     var lastBeat = Date.distantPast
+    var lastGen = -1, lastCols = 0, lastRows = 0
 
     while !app.quit {
         // Heartbeat the persistent helper so it stays alive between scans (the
@@ -411,7 +449,14 @@ func runInteractive(app: App) {
         if app.autoRefresh, Date().timeIntervalSince(lastAuto) >= app.interval {
             if app.triggerScan() { lastAuto = Date() }
         }
-        draw(app)
+        // Redraw only when something actually changed — input, scan state, or a
+        // resize. Otherwise the loop just idles in readKey() at ~0% CPU.
+        let sz = termSize()
+        let gen = app.readGeneration()
+        if gen != lastGen || sz.cols != lastCols || sz.rows != lastRows {
+            draw(app)
+            lastGen = gen; lastCols = sz.cols; lastRows = sz.rows
+        }
         if let k = readKey() { handleKey(k, app: app) }
     }
     leaveRaw()
@@ -441,6 +486,7 @@ func handleKey(_ k: Character, app: App) {
     case "-", "_": app.interval = max(2, app.interval - 1)
     default: break
     }
+    app.markDirty()   // any key may have changed view state → redraw next loop
 }
 
 func setSort(_ app: App, _ key: SortKey) {
@@ -466,34 +512,34 @@ func draw(_ app: App) {
     var lines: [String] = []
 
     // Header
-    let scanningTag = snap.scanning ? Ansi.fg256(" ⟳ scanning…", 226) : ""
+    let scanningTag = snap.scanning ? Ansi.fg256(" ⟳ scanning…", Pal.scanning) : ""
     let lastStr = snap.last.map { timeFormatter.string(from: $0) } ?? "—"
-    let head1 = Ansi.bg256(Ansi.bold(Ansi.fg256("  wifiscan  ", 231)), 25)
-        + " " + Ansi.fg256("iface ", 244) + Ansi.fg256(snap.iface, 252)
-        + Ansi.fg256("  connected ", 244) + Ansi.fg256(snap.conn ?? "—", 252)
-        + Ansi.fg256("  location ", 244)
-        + Ansi.fg256(snap.loc, snap.loc == "authorized" ? 47 : 208)
+    let head1 = Ansi.bg256(Ansi.bold(Ansi.fg256("  wifiscan  ", Pal.badgeFg)), Pal.badgeBg)
+        + " " + Ansi.fg256("iface ", Pal.label) + Ansi.fg256(snap.iface, Pal.value)
+        + Ansi.fg256("  connected ", Pal.label) + Ansi.fg256(snap.conn ?? "—", Pal.value)
+        + Ansi.fg256("  location ", Pal.label)
+        + Ansi.fg256(snap.loc, snap.loc == "authorized" ? Pal.accent : Pal.warn)
         + scanningTag
     lines.append(clipAnsi(head1, layout.cols))
 
-    let head2 = Ansi.fg256("networks ", 244) + Ansi.bold("\(snap.nets.count)")
-        + Ansi.fg256("  shown ", 244) + "\(visible.count)"
-        + Ansi.fg256("  view ", 244) + (app.graphMode ? "channel-map" : "list")
-        + Ansi.fg256("  sort ", 244) + app.sortKey.label + (app.ascending ? "↑" : "↓")
-        + Ansi.fg256("  filter ", 244) + bandFilterLabel(app.bandFilter)
-        + Ansi.fg256("  auto ", 244) + (app.autoRefresh ? "on(\(Int(app.interval))s)" : "off")
-        + Ansi.fg256("  last ", 244) + lastStr
+    let head2 = Ansi.fg256("networks ", Pal.label) + Ansi.bold("\(snap.nets.count)")
+        + Ansi.fg256("  shown ", Pal.label) + "\(visible.count)"
+        + Ansi.fg256("  view ", Pal.label) + (app.graphMode ? "channel-map" : "list")
+        + Ansi.fg256("  sort ", Pal.label) + app.sortKey.label + (app.ascending ? "↑" : "↓")
+        + Ansi.fg256("  filter ", Pal.label) + bandFilterLabel(app.bandFilter)
+        + Ansi.fg256("  auto ", Pal.label) + (app.autoRefresh ? "on(\(Int(app.interval))s)" : "off")
+        + Ansi.fg256("  last ", Pal.label) + lastStr
     lines.append(clipAnsi(head2, layout.cols))
     lines.append(Ansi.dim(String(repeating: "─", count: min(layout.cols, 120))))
 
     if let err = snap.err {
-        lines.append(clipAnsi(Ansi.fg256("scan error: \(err)", 196), layout.cols))
+        lines.append(clipAnsi(Ansi.fg256("scan error: \(err)", Pal.error), layout.cols))
     }
     // SSID names are masked only when Location isn't authorized — distinguish that
     // from genuinely hidden (cloaked) APs using the helper's reported status.
     let hidden = snap.nets.filter { $0.hidden }.count
     if !snap.nets.isEmpty && hidden > 0 && snap.loc != "authorized" && snap.loc != "unknown" {
-        lines.append(Ansi.fg256("⚠ SSIDs hidden — Location Services isn't active for wifiscan.", 208))
+        lines.append(Ansi.fg256("⚠ SSIDs hidden — Location Services isn't active for wifiscan.", Pal.warn))
         lines.append(Ansi.dim("  Enable 'wifiscan' in System Settings → Privacy & Security → Location Services, then rerun."))
     }
 
@@ -596,9 +642,9 @@ func runOnce(app: App, json: Bool) {
         return
     }
     print(Ansi.bold("wifiscan — \(nets.count) networks  (iface \(app.scanner.interfaceName), connected \(app.scanner.currentSSID ?? "—"))"))
-    if let e = result.error { print(Ansi.fg256("scan error: \(e)", 196)) }
+    if let e = result.error { print(Ansi.fg256("scan error: \(e)", Pal.error)) }
     if !nets.isEmpty && result.status != "authorized" && nets.contains(where: { $0.hidden }) {
-        print(Ansi.fg256("⚠ SSIDs hidden — enable 'wifiscan' in System Settings → Privacy & Security → Location Services.", 208))
+        print(Ansi.fg256("⚠ SSIDs hidden — enable 'wifiscan' in System Settings → Privacy & Security → Location Services.", Pal.warn))
     }
     print("")
     for line in renderTable(nets, cols: termSize().cols) { print(line) }
@@ -614,10 +660,10 @@ func runOnce(app: App, json: Bool) {
 //
 // macOS 26 redacts Wi-Fi SSIDs for any process that isn't launched as a real app
 // session: a CLI spawned by a shell gets masked names even when Location Services
-// is authorized. The fix (found empirically) is to perform each scan in a
-// short-lived helper instance of ourselves launched via LaunchServices (`open`),
-// which counts as an app session and sees real SSIDs, then hand the results back
-// as JSON over a temp file.
+// is authorized. The fix (found empirically) is to run scans in a helper instance
+// of ourselves launched via LaunchServices (`open`), which counts as an app session
+// and sees real SSIDs. We keep one such helper alive (the persistent daemon below)
+// and hand results back as JSON over a per-front-end control dir.
 
 struct ScanRecord: Codable {
     let ssid: String, rssi: Int, noise: Int, channel: Int
@@ -637,51 +683,10 @@ private func bss(_ r: ScanRecord) -> BSS {
         band: Band.from(r.band), widthMHz: r.widthMHz, security: r.security, hidden: r.hidden)
 }
 
-/// Helper mode (reached only via `open`): briefly engage Location, scan, write JSON, exit.
-final class ScanJSONHelper: NSObject, CLLocationManagerDelegate {
-    private let mgr = CLLocationManager()
-    private let path: String
-    init(path: String) { self.path = path; super.init(); mgr.delegate = self }
-    func go() {
-        // Hard backstop: the helper must never hang the parent's `open -W` wait,
-        // even if the scan/Location callback never returns.
-        DispatchQueue.global().asyncAfter(deadline: .now() + 8) { exit(2) }
-        mgr.requestWhenInUseAuthorization()
-        mgr.startUpdatingLocation()
-        Timer.scheduledTimer(withTimeInterval: 1.0, repeats: false) { [self] _ in
-            let r = Scanner().scan()
-            let status: String
-            switch mgr.authorizationStatus {
-            case .authorizedAlways, .authorized: status = "authorized"
-            case .denied: status = "denied"
-            case .restricted: status = "restricted"
-            case .notDetermined: status = "not-determined"
-            @unknown default: status = "unknown"
-            }
-            let out = ScanFile(error: r.error, status: status, nets: r.nets.map(record))
-            do {
-                let data = try JSONEncoder().encode(out)
-                try data.write(to: URL(fileURLWithPath: path))
-                exit(0)
-            } catch {
-                // Last-ditch: surface the failure so the front-end sees a cause
-                // rather than a generic "no output".
-                let fallback = ScanFile(error: "helper write failed: \(error.localizedDescription)",
-                                        status: status, nets: [])
-                if let d = try? JSONEncoder().encode(fallback) {
-                    try? d.write(to: URL(fileURLWithPath: path))
-                }
-                exit(1)
-            }
-        }
-        RunLoop.current.run()
-    }
-}
-
 /// Resolve the real .app bundle path. Bundle.main is unreliable when we're invoked
 /// through the ~/.bin/wifiscan symlink (it reports the symlink's directory), so we
 /// resolve the actual executable and walk up to the enclosing ".app".
-func appBundlePath() -> String {
+private func appBundlePath() -> String {
     var size: UInt32 = 4096
     var buf = [CChar](repeating: 0, count: Int(size))
     var exe = Bundle.main.executablePath ?? (CommandLine.arguments.first ?? "")
@@ -702,41 +707,14 @@ func appBundlePath() -> String {
 
 // MARK: Atomic file IPC helpers
 
-func atomicWriteString(_ path: String, _ s: String) {
+private func atomicWriteString(_ path: String, _ s: String) {
     try? s.write(toFile: path, atomically: true, encoding: .utf8)   // temp + rename
 }
-func readIntFile(_ path: String) -> Int? {
+private func readIntFile(_ path: String) -> Int? {
     guard let s = try? String(contentsOfFile: path, encoding: .utf8) else { return nil }
     return Int(s.trimmingCharacters(in: .whitespacesAndNewlines))
 }
-func processAlive(_ pid: pid_t) -> Bool { pid > 0 && kill(pid, 0) == 0 }
-
-// MARK: One-shot helper (fallback + backward-compatible `--scan-json` path)
-
-/// Run a single scan in a short-lived `open`-launched helper and read it back.
-/// Used as a fallback when the persistent daemon can't be reached.
-func oneShotScan(bundle: String) -> (nets: [BSS], error: String?, status: String?) {
-    let tmp = NSTemporaryDirectory() + "wifiscan-\(getpid()).json"
-    try? FileManager.default.removeItem(atPath: tmp)
-    let p = Process()
-    p.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-    // -n new instance · -W wait for exit · -g don't foreground · -j launch hidden
-    p.arguments = ["-n", "-W", "-g", "-j", bundle, "--args", "--scan-json", tmp]
-    do { try p.run() } catch {
-        return ([], "could not launch scan helper: \(error.localizedDescription)", nil)
-    }
-    let deadline = Date().addingTimeInterval(15)
-    while p.isRunning && Date() < deadline { usleep(50_000) }
-    if p.isRunning { p.terminate(); return ([], "scan helper timed out", nil) }
-    guard let data = FileManager.default.contents(atPath: tmp) else {
-        return ([], "scan helper produced no output", nil)
-    }
-    try? FileManager.default.removeItem(atPath: tmp)
-    guard let f = try? JSONDecoder().decode(ScanFile.self, from: data) else {
-        return ([], "could not parse scan helper output", nil)
-    }
-    return (f.nets.map(bss), f.error, f.status)
-}
+private func processAlive(_ pid: pid_t) -> Bool { pid > 0 && kill(pid, 0) == 0 }
 
 // MARK: Persistent scan daemon
 //
@@ -750,7 +728,7 @@ func oneShotScan(bundle: String) -> (nets: [BSS], error: String?, status: String
 // The helper stays a LaunchServices app session (so SSIDs reveal exactly as the
 // per-scan helper did) and pays the Location settle only once, at startup.
 
-var helperPidGlobal: pid_t = 0   // mirrored so the signal handler can SIGTERM it on exit
+private var helperPidGlobal: pid_t = 0   // mirrored so the signal handler can SIGTERM it on exit
 
 final class HelperClient {
     static let shared = HelperClient()
@@ -762,8 +740,8 @@ final class HelperClient {
     /// Refresh the heartbeat so the daemon knows we're alive (call periodically).
     func beat() { atomicWriteString(dir + "beat", "\(Int(Date().timeIntervalSince1970))") }
 
-    /// One scan: drive the persistent daemon, falling back to a one-shot helper if
-    /// the daemon can't be reached (so scanning always works).
+    /// One scan via the persistent daemon. On the rare infra failure the daemon is
+    /// torn down (see daemonScan), so the next call relaunches a fresh one.
     func scan() -> (nets: [BSS], error: String?, status: String?) {
         lock.lock(); defer { lock.unlock() }
         let bundle = appBundlePath()
@@ -771,8 +749,7 @@ final class HelperClient {
         guard bundle.hasSuffix(".app") else {
             return ([], "not running from a .app bundle — install with `make`; SSID scan needs the bundle's identity", nil)
         }
-        if let res = daemonScan(bundle: bundle) { return res }
-        return oneShotScan(bundle: bundle)
+        return daemonScan(bundle: bundle) ?? ([], "scan helper restarting…", nil)
     }
 
     func shutdown() {
@@ -863,7 +840,7 @@ final class ScanDaemon: NSObject, CLLocationManagerDelegate {
         mgr.requestWhenInUseAuthorization()
         mgr.startUpdatingLocation()
         startTime = Date(); lastActivity = Date()
-        Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [self] _ in tick() }
+        Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [self] _ in tick() }
         RunLoop.current.run()
     }
 
@@ -909,7 +886,7 @@ final class ScanDaemon: NSObject, CLLocationManagerDelegate {
 /// Best-effort sweep of temp files / daemon control dirs leaked by helpers that
 /// crashed before cleanup. Live daemon dirs are kept fresh by the heartbeat, so
 /// only genuinely stale (>5 min untouched) `wifiscan-*` items are removed.
-func sweepStaleTempFiles() {
+private func sweepStaleTempFiles() {
     let dir = NSTemporaryDirectory()
     guard let items = try? FileManager.default.contentsOfDirectory(atPath: dir) else { return }
     let cutoff = Date().addingTimeInterval(-300)
@@ -924,10 +901,12 @@ func sweepStaleTempFiles() {
 
 // MARK: - Relaunch in Terminal (for Finder/Spotlight/Dock launches)
 
-/// Open Terminal and exec this binary there, so a double-click "opens the app".
-/// `exec` replaces Terminal's shell with wifiscan, so quitting the TUI closes the
+/// Open the user's terminal and exec this binary there, so a double-click "opens
+/// the app". `exec` replaces the shell with wifiscan, so quitting the TUI closes the
 /// window. The in-bundle binary keeps the app's code identity, so Location works.
-func relaunchInTerminal() {
+/// Prefers iTerm if it's installed (a strong signal it's the user's terminal),
+/// otherwise Terminal.app.
+private func relaunchInTerminal() {
     let exe = Bundle.main.executablePath ?? CommandLine.arguments.first ?? "wifiscan"
     let shellSafe = exe.replacingOccurrences(of: "'", with: "'\\''")   // shell single-quote escape
     let shellCmd = "clear; exec '\(shellSafe)'"
@@ -937,12 +916,23 @@ func relaunchInTerminal() {
     let asSafe = shellCmd
         .replacingOccurrences(of: "\\", with: "\\\\")
         .replacingOccurrences(of: "\"", with: "\\\"")
-    let script = """
-    tell application "Terminal"
-        activate
-        do script "\(asSafe)"
-    end tell
-    """
+    let script: String
+    if FileManager.default.fileExists(atPath: "/Applications/iTerm.app") {
+        script = """
+        tell application "iTerm"
+            activate
+            set w to (create window with default profile)
+            tell current session of w to write text "\(asSafe)"
+        end tell
+        """
+    } else {
+        script = """
+        tell application "Terminal"
+            activate
+            do script "\(asSafe)"
+        end tell
+        """
+    }
     let p = Process()
     p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
     p.arguments = ["-e", script]
@@ -978,16 +968,20 @@ func main() {
 
     if args.contains("--help") || args.contains("-h") { printHelp(); return }
 
-    // Internal helper modes — reached only when relaunched via `open`, never typed.
-    if let i = args.firstIndex(of: "--scan-json") {
-        let out = i + 1 < args.count ? args[i+1] : NSTemporaryDirectory() + "wifiscan-scan.json"
-        ScanJSONHelper(path: out).go()
-        return
-    }
+    // Internal helper mode — reached only when relaunched via `open`, never typed.
     if let i = args.firstIndex(of: "--scan-daemon") {
         let d = i + 1 < args.count ? args[i+1] : NSTemporaryDirectory() + "wifiscan-daemon/"
         ScanDaemon(dir: d).run()
         return
+    }
+
+    // Reject anything we don't recognise (--help/-h and the internal --scan-daemon
+    // are handled above; the rest are the user modes). This also turns a stray legacy
+    // `--scan-json` launch into a clean error exit rather than a Terminal pop-up.
+    let known: Set<String> = ["--once", "--json", "--diag"]
+    for a in args.dropFirst() where !known.contains(a) {
+        FileHandle.standardError.write(Data("error: unknown option '\(a)' (see --help)\n".utf8))
+        exit(2)
     }
 
     // Colour is automatic: on for an interactive terminal, off when piped/redirected

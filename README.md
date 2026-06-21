@@ -106,7 +106,8 @@ echo 'export PATH="$HOME/.bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
 ```
 
 Then run `wifiscan` from any terminal, or **double‑click `wifiscan.app`** — it
-reopens itself inside Terminal and runs the TUI.
+reopens itself inside your terminal (iTerm if installed, else Terminal) and runs
+the TUI.
 
 ## First run: grant Location Services
 
@@ -210,7 +211,9 @@ is obvious at a glance:
 ```
 
 `Nap` is the number of APs overlapping that channel; the dBm is the strongest of
-them; `DFS` marks 5 GHz channels subject to radar detection.
+them; the bar's **colour** tracks congestion too (green = quiet → red = busiest in
+the band), so colour and length tell the same story. `DFS` marks 5 GHz channels
+subject to radar detection.
 
 ## How recommendations work
 
@@ -290,10 +293,9 @@ Location **once**, then stays alive and serves each scan request over a small
 atomic‑file protocol in `<control-dir>`, writing results back as JSON. The
 front‑end heart‑beats the helper, so it self‑exits if the TUI quits or crashes.
 Because the helper persists, refreshes after the first avoid both the process spawn
-and the Location settle and are near‑instant. (A short‑lived `--scan-json` one‑shot
-helper remains as a fallback.) **No Apple Developer account and no special
-entitlement are required** — only the Location grant. The full investigation is in
-the commit history.
+and the Location settle and are near‑instant. **No Apple Developer account and no
+special entitlement are required** — only the Location grant. The full investigation
+is in the commit history.
 
 ## Architecture
 
@@ -316,10 +318,10 @@ the commit history.
 - **Helper** (`wifiscan --scan-daemon`, reached only via `open`): a long‑lived
   LaunchServices app session that engages Location once and serves each scan over a
   file protocol so SSIDs are visible. Subsequent scans skip both the process spawn
-  and the Location settle, so refreshes after the first are near‑instant. A
-  short‑lived `--scan-json` helper remains as a fallback.
+  and the Location settle, so refreshes after the first are near‑instant.
 - **Double‑click**: when launched without a TTY (Finder / Spotlight / Dock), the app
-  reopens itself in Terminal so the TUI has somewhere to draw.
+  reopens itself in your terminal (iTerm if installed, else Terminal) so the TUI has
+  somewhere to draw.
 
 ## Troubleshooting
 
@@ -329,7 +331,7 @@ the commit history.
 | SSIDs were working, broke after `make` | Ad‑hoc identity changed on rebuild → grant lost. Re‑enable **wifiscan** in Location Services, or use a [stable signing cert](#keep-the-grant-across-rebuilds-optional). |
 | `wifiscan --diag` shows `SSIDs visible: 0/N` | Same as above — permission. The metadata (power/channel) still works. |
 | First scan takes a few seconds | Expected — the first scan launches the persistent helper and settles Location once. Subsequent refreshes reuse it and are near‑instant. |
-| Double‑click prompts "wifiscan wants to control Terminal" | One‑time macOS Automation prompt — click **OK**; it won't ask again. |
+| Double‑click prompts "wifiscan wants to control Terminal" (or iTerm) | One‑time macOS Automation prompt — click **OK**; it won't ask again. |
 | `Wi‑Fi is powered off` | Turn Wi‑Fi on; the radio must be up to scan. |
 | `command not found: wifiscan` | `~/.bin` isn't on your `PATH` — see [Install](#install). |
 
@@ -373,9 +375,8 @@ wifiscan --diag            # verify scanning + permission
 Two files: **`Core.swift`** holds the pure, framework‑free logic (channel plan,
 bonding model, congestion scoring, sorting, text layout) and is unit‑tested
 standalone via `make test`; **`main.swift`** holds `Scanner` (CoreWLAN wrapper),
-`HelperClient` / `ScanDaemon` (the persistent out‑of‑process scan, with a
-`--scan-json` one‑shot fallback), and the raw‑mode TUI (`enterRaw` / `draw` /
-`runInteractive`).
+`HelperClient` / `ScanDaemon` (the persistent out‑of‑process scan), and the
+raw‑mode TUI (`enterRaw` / `draw` / `runInteractive`).
 
 ## License
 

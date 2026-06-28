@@ -1,6 +1,6 @@
 # wifiscan
 
-[![CI](https://github.com/lucasdaddiego/macos-wifi-scan/actions/workflows/ci.yml/badge.svg)](https://github.com/lucasdaddiego/macos-wifi-scan/actions/workflows/ci.yml)
+[![CI](https://github.com/lucasdaddiego/wifiscan/actions/workflows/ci.yml/badge.svg)](https://github.com/lucasdaddiego/wifiscan/actions/workflows/ci.yml)
 ![platform](https://img.shields.io/badge/platform-macOS%2012%2B-black?logo=apple)
 ![language](https://img.shields.io/badge/Swift-5.9%2B-orange?logo=swift)
 ![dependencies](https://img.shields.io/badge/dependencies-none-brightgreen)

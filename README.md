@@ -186,8 +186,9 @@ wifiscan --help                     # usage summary
 
 Everything else is a **live** TUI control. Sort column, band filter and refresh
 interval are changed with keys while running (see
-[keyboard shortcuts](#keyboard-shortcuts)) and are **remembered across runs** in
-`~/.config/wifiscan/config.json` (flags override). **Colour is automatic**: on in a
+[keyboard shortcuts](#keyboard-shortcuts)); sort, interval and auto‑refresh are
+**remembered across runs** in `~/.config/wifiscan/config.json` (flags override;
+band filter and graph mode deliberately reset each launch). **Colour is automatic**: on in a
 terminal, off when piped or redirected. Set `NO_COLOR` to force it off. **Truecolor**
 is used when the terminal advertises it (`COLORTERM=truecolor`, as Ghostty/iTerm/kitty
 do); otherwise the 256‑colour palette is used.

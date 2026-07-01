@@ -203,18 +203,15 @@ enum Analysis {
     }
 }
 
-/// Tag for how much busier a candidate is than the cleanest one (`best`), both
-/// ChannelLoad.weighted energy sums:
-///  - nil when the candidate is clean, or within rounding of best (nothing to say)
-///  - "+N dB" above a non-silent best (+3dB ≈ double the interfering energy)
-///  - absolute "N dBm" when best is silent (a relative margin would be infinite)
+/// "+N dB" tag for how much busier a candidate is than the cleanest one (`best`),
+/// both ChannelLoad.weighted energy sums (+3dB ≈ double the interfering energy).
+/// nil when there's nothing meaningful to say: the candidate is clean, it's within
+/// rounding of best, or best is silent (a margin over silence is infinite — the ap
+/// count already tells that story).
 func loadMarginLabel(_ w: Double, best: Double) -> String? {
-    guard w > 0 else { return nil }
-    if best > 0 {
-        let db = max(0, Int((10 * log10(w / best)).rounded()))
-        return db == 0 ? nil : "+\(db)dB"
-    }
-    return "\(Int((10 * log10(w)).rounded()))dBm"
+    guard w > 0, best > 0 else { return nil }
+    let db = max(0, Int((10 * log10(w / best)).rounded()))
+    return db == 0 ? nil : "+\(db)dB"
 }
 
 // MARK: - Survey log (channel quality over time; --log / --report)

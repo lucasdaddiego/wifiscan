@@ -221,7 +221,7 @@ func order(_ nets: [BSS]) -> String { nets.map { $0.ssid }.joined() }
         eq(loadMarginLabel(2e-6, best: 1e-6), "+3dB", "double the energy → +3dB")
         eq(loadMarginLabel(1e-5, best: 1e-6), "+10dB", "10x the energy → +10dB")
         eq(loadMarginLabel(0.5e-6, best: 1e-6), nil, "below best clamps to no tag")
-        eq(loadMarginLabel(1e-6, best: 0), "-60dBm", "silent best → absolute dBm")
+        eq(loadMarginLabel(1e-6, best: 0), nil, "silent best → no tag (ap count tells the story)")
     }
 
     // MARK: Sorting

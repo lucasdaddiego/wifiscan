@@ -786,17 +786,22 @@ func draw(_ app: App) {
 
     // Body
     let recLines = renderRecommendations(snap.nets, excluding: app.effectiveExclusions(conn: snap.conn))
-    let footer = footerLines()
+    let footer = footerLines(layout.cols)
     let chrome = lines.count + recLines.count + footer.count + 2
     let bodyBudget = max(3, layout.rows - chrome)
 
+    // A band filter can empty the view while networks exist — say so instead of
+    // leaving an unexplained blank screen.
+    let filteredOut = Ansi.dim("  no networks in this band filter (\(bandFilterLabel(app.bandFilter))) — press 0 for all bands")
     var body: [String]
     if app.showHelp {
         body = helpOverlayLines()
     } else if app.graphMode {
         body = renderGraph(visible, cols: layout.cols)
+        if body.isEmpty && !snap.nets.isEmpty { body = [filteredOut] }
     } else {
         body = renderTable(visible, cols: layout.cols, connSSID: snap.conn, history: app.historyCopy())
+        if visible.isEmpty && !snap.nets.isEmpty { body.append(filteredOut) }
     }
     // Scroll handling (keep header row when scrolling table).
     let headerRow = (!app.graphMode && !app.showHelp && !body.isEmpty) ? body.removeFirst() : nil
@@ -849,9 +854,17 @@ func draw(_ app: App) {
     fflush(stdout)
 }
 
-func footerLines() -> [String] {
-    let keys = "[q]uit  [?]help  [r]escan  [g]raph  [a]uto  sort p/s/c/n/w/e/[l]oad  [b]and 1/2/6/0  j/k u/d scroll  [+/-]interval  ·  wheel scrolls · click a header to sort"
-    return [Ansi.dim(keys)]
+/// Key hints sized to the window: the widest variant that fits, so the line never
+/// gets chopped mid-word by the frame clipper. `?` always opens the full list.
+func footerLines(_ cols: Int) -> [String] {
+    let variants = [
+        "[q]uit  [?]help  [r]escan  [g]raph  [a]uto  sort p/s/c/n/w/e/[l]oad  [b]and 1/2/6/0  j/k u/d scroll  [+/-]interval  ·  wheel scrolls · click a header to sort",
+        "[q]uit  [?]help  [r]escan  [g]raph  [a]uto  sort p/s/c/n/w/e/l  [b]and 1/2/6/0  j/k scroll  [+/-]interval",
+        "[q]uit  [?]help  [r]escan  [g]raph  [b]and  j/k scroll",
+        "[q]uit  [?]help",
+    ]
+    let text = variants.first { displayWidth($0) <= cols } ?? variants.last!
+    return [Ansi.dim(text)]
 }
 
 /// The `?` key's overlay, rendered in place of the table/graph body.
@@ -954,14 +967,14 @@ func runOnce(app: App, json: Bool) {
 // MARK: - Preferences (persisted TUI view settings)
 
 /// Last-used view settings, restored at the next launch (CLI flags override).
+/// Deliberately NOT persisted: band filter and graph mode — restoring those makes
+/// the next launch open on a filtered/empty view with no visible reason.
 /// Every field is optional so old and new versions of the file coexist.
 struct Prefs: Codable {
     var sort: String?
     var ascending: Bool?
-    var band: String?
     var interval: Double?
     var autoRefresh: Bool?
-    var graphMode: Bool?
 }
 
 let prefsPath = NSHomeDirectory() + "/.config/wifiscan/config.json"
@@ -982,16 +995,13 @@ func loadPrefs(into app: App) {
           let p = try? JSONDecoder().decode(Prefs.self, from: data) else { return }
     if let s = p.sort, let k = sortNames[s] { app.sortKey = k }
     if let a = p.ascending { app.ascending = a }
-    if let b = p.band, let v = bandNames[b] { app.bandFilter = v }
     if let i = p.interval { app.interval = min(60, max(2, i)) }
     if let a = p.autoRefresh { app.autoRefresh = a }
-    if let g = p.graphMode { app.graphMode = g }
 }
 
 func savePrefs(_ app: App) {
     let p = Prefs(sort: app.sortKey.label.lowercased(), ascending: app.ascending,
-                  band: app.bandFilter?.label ?? "all", interval: app.interval,
-                  autoRefresh: app.autoRefresh, graphMode: app.graphMode)
+                  interval: app.interval, autoRefresh: app.autoRefresh)
     let dir = (prefsPath as NSString).deletingLastPathComponent
     try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
     let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -1167,8 +1177,18 @@ final class HelperClient {
     }
 
     func shutdown() {
-        lock.lock(); defer { lock.unlock() }
-        shutdownLocked()
+        // Quit must be instant — never wait behind an in-flight scan (the scan
+        // thread can hold `lock` for seconds). Lock free → full teardown; lock
+        // busy → kill the helper directly and let the scan thread die with the
+        // process (main() returns right after this).
+        if lock.try() {
+            defer { lock.unlock() }
+            shutdownLocked()
+            return
+        }
+        if helperPidGlobal > 0 { kill(helperPidGlobal, SIGTERM) }
+        helperPidGlobal = 0
+        try? FileManager.default.removeItem(atPath: dir)
     }
 
     /// Body of shutdown, for callers that ALREADY hold `lock`. NSLock is not

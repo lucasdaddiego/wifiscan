@@ -1464,9 +1464,15 @@ func main() {
     if args.contains("--help") || args.contains("-h") { printHelp(); return }
 
     // Internal helper mode — reached only when relaunched via `open`, never typed.
+    // The daemon REMOVES this dir when the front-end stops heart-beating, so accept
+    // only the shape HelperClient.startHelper creates; a hand-typed path (the flag is
+    // in the README) must be refused, not deleted.
     if let i = args.firstIndex(of: "--scan-daemon") {
         let d = i + 1 < args.count ? args[i + 1] : NSTemporaryDirectory() + "wifiscan-daemon/"
-        ScanDaemon(dir: d).run()
+        guard isDaemonControlDir(d, tempRoot: NSTemporaryDirectory()) else {
+            die("--scan-daemon is internal — its argument must be a wifiscan-daemon control dir under \(NSTemporaryDirectory())")
+        }
+        ScanDaemon(dir: d.hasSuffix("/") ? d : d + "/").run()
         return
     }
 

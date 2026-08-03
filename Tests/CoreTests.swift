@@ -44,6 +44,7 @@ func order(_ nets: [BSS]) -> String { nets.map { $0.ssid }.joined() }
         testBars()
         testLayout()
         testSanitize()
+        testDaemonDir()
 
         print("\(checks - failures)/\(checks) checks passed")
         exit(failures == 0 ? 0 : 1)
@@ -476,5 +477,33 @@ func order(_ nets: [BSS]) -> String { nets.map { $0.ssid }.joined() }
         eq(sanitizeSSID("x\u{85}y"), "x·y", "C1 control (NEL, 0x85) neutralised")  // 0x80…0x9F
         // Width preservation keeps table columns aligned regardless of escapes.
         eq(displayWidth(sanitizeSSID("a\u{1B}\u{7F}b")), 4, "sanitised name keeps display width")
+    }
+
+    // MARK: Scan-helper control dir (--scan-daemon argument)
+
+    static func testDaemonDir() {
+        let t = "/var/folders/ab/T/"
+        // The shapes the front-end itself produces must keep working.
+        ok(isDaemonControlDir(t + "wifiscan-daemon-4321/", tempRoot: t), "per-pid control dir accepted")
+        ok(isDaemonControlDir(t + "wifiscan-daemon-4321", tempRoot: t), "trailing slash optional")
+        ok(isDaemonControlDir(t + "wifiscan-daemon/", tempRoot: t), "no-pid fallback dir accepted")
+        ok(isDaemonControlDir(t + "wifiscan-daemon-1", tempRoot: "/var/folders/ab/T"),
+           "tempRoot trailing slash optional")
+        // Everything else is refused — the daemon DELETES the dir it is handed, so a
+        // hand-typed `--scan-daemon ~/Desktop` (or `.`) must never reach ScanDaemon.
+        ok(!isDaemonControlDir("/Users/me/Desktop", tempRoot: t), "arbitrary absolute dir refused")
+        ok(!isDaemonControlDir(".", tempRoot: t), "cwd refused")
+        ok(!isDaemonControlDir("relative/wifiscan-daemon-1", tempRoot: t), "relative path refused")
+        ok(!isDaemonControlDir(t + "wifiscan-daemon-1", tempRoot: "relative/T"), "relative tempRoot refused")
+        ok(!isDaemonControlDir("/", tempRoot: t), "filesystem root refused")
+        ok(!isDaemonControlDir(t, tempRoot: t), "the temp dir itself refused")
+        ok(!isDaemonControlDir(t + "wifiscan-daemon-1/sub", tempRoot: t), "nested path refused")
+        ok(!isDaemonControlDir("/var/folders/ab/X/wifiscan-daemon-1", tempRoot: t),
+           "right shape, wrong parent refused")
+        ok(!isDaemonControlDir(t + "../../../Users/me/Desktop", tempRoot: t), "traversal out of temp refused")
+        ok(!isDaemonControlDir(t + "wifiscan-daemonX", tempRoot: t), "prefix without separator refused")
+        ok(!isDaemonControlDir(t + "wifiscan-daemon-", tempRoot: t), "empty pid refused")
+        ok(!isDaemonControlDir(t + "wifiscan-daemon-12a", tempRoot: t), "non-numeric pid refused")
+        ok(!isDaemonControlDir(t + "notes", tempRoot: t), "unrelated dir inside temp refused")
     }
 }

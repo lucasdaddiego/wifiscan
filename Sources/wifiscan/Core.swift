@@ -600,3 +600,33 @@ func sanitizeSSID(_ s: String) -> String {
     }
     return String(out)
 }
+
+// MARK: - Scan-helper control dir
+//
+// `--scan-daemon <dir>` is an INTERNAL flag: the front-end creates a control dir under
+// the temp dir and passes it to the helper it launches via `open`. The helper *deletes*
+// that dir when the front-end stops heart-beating, so the argument must never be taken
+// on trust — it is documented in the README, so `wifiscan --scan-daemon ~/Desktop` is a
+// plausible thing to type and used to wipe that directory ~5 s later.
+
+/// True when `path` has the exact shape HelperClient creates:
+/// `<tempRoot>/wifiscan-daemon` or `<tempRoot>/wifiscan-daemon-<pid>`, optionally with a
+/// trailing slash. Compared component-wise, so trailing/doubled separators and `..`
+/// traversal can't smuggle a path past a plain prefix test. Anything else is refused by
+/// main() with a usage error instead of being removed.
+func isDaemonControlDir(_ path: String, tempRoot: String) -> Bool {
+    guard path.hasPrefix("/"), tempRoot.hasPrefix("/") else { return false }
+    let parts = path.split(separator: "/", omittingEmptySubsequences: true)
+    let rootParts = tempRoot.split(separator: "/", omittingEmptySubsequences: true)
+    // Exactly one component below the temp root — not the root itself, not nested.
+    guard parts.count == rootParts.count + 1, Array(parts.dropLast()) == Array(rootParts) else {
+        return false
+    }
+    let name = parts[parts.count - 1]
+    guard name.hasPrefix("wifiscan-daemon") else { return false }
+    let rest = name.dropFirst("wifiscan-daemon".count)
+    if rest.isEmpty { return true }                     // the no-pid fallback dir
+    guard rest.hasPrefix("-") else { return false }     // e.g. "wifiscan-daemonX"
+    let pid = rest.dropFirst()
+    return !pid.isEmpty && pid.unicodeScalars.allSatisfy { (48...57).contains($0.value) }
+}

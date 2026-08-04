@@ -205,7 +205,7 @@ do); otherwise the 256‑colour palette is used.
 | **Signal** | Colour bar of the same value. |
 | **SNR** | Signal‑to‑noise ratio in dB — only shown for the channel your radio is tuned to (see [limitations](#known-macos-limitations)); `—` otherwise. |
 | **Load** | The AP's own **QBSS airtime utilisation** broadcast (`42%` = its channel is busy 42% of the time), green → red. `—` when the AP doesn't broadcast it. RSSI says *loud*; this says *busy*. Shown on wide terminals. |
-| **Sec** | Security: `Open`, `WEP`, `WPA`, `WPA2`, `WPA3`, or `WPA2/3` (transition). |
+| **Sec** | Security: `Open`, `WEP`, `WPA`, `WPA2`, `WPA3`, `WPA2/3` (transition), or `OWE` / `OWE-T` (WPA3 Enhanced Open). |
 | **Trend** | Sparkline of recent RSSI samples (last ~12 refreshes), so you can see a signal drifting or fluctuating at a glance. Shown on wide terminals only. |
 
 **Signal colour key** (by dBm): bright‑green `≥ -50` · green `-50…-60` · yellow
@@ -312,8 +312,9 @@ is least bad (minimax), i.e. the safe set‑and‑forget choice:
   all-day pick: ch 149  (worst hour -78dBm)
 ```
 
-Each log line is one JSON object (`ts` epoch seconds + the networks seen), so the
-file is also easy to post‑process with `jq`.
+Each log line is one JSON object (`ts` epoch seconds, the networks seen, and `conn`
+— the connected SSID at the time, so `--report` can exclude your own network the way
+the live modes do), so the file is also easy to post‑process with `jq`.
 
 ## JSON output
 

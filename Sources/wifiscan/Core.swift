@@ -236,10 +236,28 @@ struct SurveyNet: Codable {
     }
 }
 
-/// One logged scan: epoch seconds + what was in the air.
+/// One logged scan: epoch seconds + what was in the air. `conn` is the connected
+/// SSID at the time of the scan — logged because `--report` runs no scan helper and
+/// macOS denies the front-end that name, so the log itself is the only way report
+/// mode can keep the "your own networks are excluded" promise. Optional: lines
+/// written before it existed still decode (as nil).
 struct SurveyScan: Codable {
     let ts: Double
     let nets: [SurveyNet]
+    let conn: String?
+
+    init(ts: Double, nets: [SurveyNet], conn: String? = nil) {
+        self.ts = ts; self.nets = nets; self.conn = conn
+    }
+
+    /// True when every logged RSSI is a physically possible one. A survey log is a
+    /// plain text file, so a hand-edited or corrupted line can decode as well-formed
+    /// JSON while carrying nonsense — and rssi is the field that does damage, because
+    /// linearPower is 10^(rssi/10): past ~3080 dBm it overflows to +inf, poisons every
+    /// average it lands in and traps the Int conversion that formats it as dB. A
+    /// received signal is never above 0 dBm, so anything that is means the line is
+    /// junk and `--report` drops it exactly as it drops a truncated one.
+    var plausible: Bool { nets.allSatisfy { $0.rssi <= 0 } }
 }
 
 enum Survey {

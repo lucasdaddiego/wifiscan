@@ -351,6 +351,28 @@ func order(_ nets: [BSS]) -> String { nets.map { $0.ssid }.joined() }
            && b.widthMHz == 80 && b.utilization == 0.3, "SurveyNet ↔ BSS keeps scoring fields")
         ok(b.noise == 0 && !b.hidden, "unlogged fields get inert defaults")
 
+        // conn: the connected SSID as of that scan, so --report can exclude your own
+        // network (it runs no scan helper, and macOS denies the front-end the name).
+        // Optional, so lines written before the field existed still decode.
+        eq(SurveyScan(ts: 1, nets: []).conn, nil, "conn defaults to nil")
+        let withConn = try! JSONEncoder().encode(SurveyScan(ts: 1, nets: [], conn: "Home"))
+        eq(try! JSONDecoder().decode(SurveyScan.self, from: withConn).conn, "Home", "conn round-trips")
+        eq(try! JSONDecoder().decode(SurveyScan.self, from: Data(#"{"ts":1,"nets":[]}"#.utf8)).conn, nil,
+           "a log line without conn still decodes")
+
+        // plausible: a hand-edited or corrupted log line can decode as valid JSON and
+        // still be nonsense. rssi is the one that does damage — 10^(rssi/10) overflows
+        // to +inf, poisoning every average and trapping the dB conversion that prints
+        // it — so an impossible (positive) RSSI means the whole line is junk.
+        ok(mk("A", 100000, 36, .ghz5).linearPower.isInfinite, "absurd rssi overflows linearPower to +inf")
+        ok(SurveyScan(ts: 0, nets: [SurveyNet(mk("A", -48, 36, .ghz5))]).plausible, "a real RSSI is plausible")
+        ok(SurveyScan(ts: 0, nets: [SurveyNet(mk("A", 0, 36, .ghz5))]).plausible, "0 dBm is the upper bound")
+        ok(SurveyScan(ts: 0, nets: []).plausible, "an empty scan is plausible")
+        ok(!SurveyScan(ts: 0, nets: [SurveyNet(mk("A", 100000, 36, .ghz5))]).plausible,
+           "impossible positive RSSI → implausible line")
+        ok(!SurveyScan(ts: 0, nets: [SurveyNet(mk("ok", -50, 36, .ghz5)), SurveyNet(mk("bad", 1, 36, .ghz5))]).plausible,
+           "one junk row condemns the line")
+
         // averageLoads: mean energy per scan (busy scan + empty scan → half), peak counts.
         let ap = mk("x", -50, 36, .ghz5)
         let avg = Survey.averageLoads([[ap], []], band: .ghz5, candidates: [36])

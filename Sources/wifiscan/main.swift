@@ -38,7 +38,12 @@ final class Scanner {
         (.wpa3Enterprise, "WPA3-E"), (.wpa3Personal, "WPA3"), (.wpa3Transition, "WPA3-T"),
         (.wpa2Enterprise, "WPA2-E"), (.wpa2Personal, "WPA2"),
         (.wpaEnterprise, "WPA-E"), (.wpaPersonal, "WPA"),
-        (.WEP, "WEP"), (.dynamicWEP, "dWEP"), (.none, "Open"),
+        (.WEP, "WEP"), (.dynamicWEP, "dWEP"),
+        // WPA3 Enhanced Open. Probed before .none so a transition-mode BSS — which
+        // advertises both — reads as OWE-T rather than plain Open; without these two
+        // an Enhanced Open AP matches nothing and shows up as "?".
+        (.OWE, "OWE"), (.oweTransition, "OWE-T"),
+        (.none, "Open"),
     ]
 
     static func securityLabel(_ n: CWNetwork) -> String {
@@ -102,10 +107,6 @@ enum Ansi {
     static func fg256(_ s: String, _ c: Int) -> String { wrap(s, "38;5;\(c)") }
     static func bg256(_ s: String, _ c: Int) -> String { wrap(s, "48;5;\(c)") }
     static func fgRGB(_ s: String, _ c: RGB) -> String { wrap(s, "38;2;\(c.r);\(c.g);\(c.b)") }
-
-    // Signal → colour (256-palette). Logic lives in Core (signalColorCode) so it
-    // is unit-testable without this enum.
-    static func signalColor(_ rssi: Int) -> Int { signalColorCode(rssi) }
 
     /// Colour a string by signal strength — a smooth 24-bit gradient on truecolor
     /// terminals, the 256-palette bucket otherwise.
@@ -472,7 +473,7 @@ final class App {
             // under macOS 26's redaction rules); the helper always is — fall back to it.
             let conn = self.scanner.currentSSID ?? result.conn
             if result.error == nil, let path = self.logPath {
-                appendSurveyLog(path, nets: result.nets)
+                appendSurveyLog(path, nets: result.nets, conn: conn)
             }
             self.lock.lock()
             if result.error == nil {
@@ -925,13 +926,13 @@ func runDiag(app: App) {
 func runOnce(app: App, json: Bool) {
     let result = HelperClient.shared.scan()
     HelperClient.shared.shutdown()   // one-shot mode: don't leave a daemon behind
+    let conn = app.scanner.currentSSID ?? result.conn
     if result.error == nil, let path = app.logPath {
-        appendSurveyLog(path, nets: result.nets)   // log the FULL scan, pre-filter
+        appendSurveyLog(path, nets: result.nets, conn: conn)   // log the FULL scan, pre-filter
     }
     var all = result.nets
     if let bf = app.bandFilter { all = all.filter { $0.band == bf } }
     let nets = sortNets(all, by: app.sortKey, ascending: app.ascending)
-    let conn = app.scanner.currentSSID ?? result.conn
     if json {
         struct Out: Encodable {
             let ssid: String; let rssi: Int; let noise: Int?
@@ -1011,8 +1012,8 @@ func savePrefs(_ app: App) {
 // MARK: - Survey log & report (--log / --report)
 
 /// Append one scan to the JSONL survey log (one SurveyScan object per line).
-func appendSurveyLog(_ path: String, nets: [BSS]) {
-    let scan = SurveyScan(ts: Date().timeIntervalSince1970, nets: nets.map(SurveyNet.init))
+func appendSurveyLog(_ path: String, nets: [BSS], conn: String?) {
+    let scan = SurveyScan(ts: Date().timeIntervalSince1970, nets: nets.map(SurveyNet.init), conn: conn)
     guard let data = try? JSONEncoder().encode(scan) else { return }
     if !FileManager.default.fileExists(atPath: path) {
         FileManager.default.createFile(atPath: path, contents: nil)
@@ -1024,6 +1025,19 @@ func appendSurveyLog(_ path: String, nets: [BSS]) {
     fh.write(Data("\n".utf8))
 }
 
+/// Can we actually append to the --log path? Run once at startup, because
+/// appendSurveyLog runs on the scan thread (which owns no screen and can only drop
+/// an error on the floor) — so a path whose directory doesn't exist would otherwise
+/// log nothing, silently, for the whole run. Opens it exactly as appendSurveyLog
+/// does, creating the file if needed, so success here means success there.
+func canWriteSurveyLog(_ path: String) -> Bool {
+    if !FileManager.default.fileExists(atPath: path),
+       !FileManager.default.createFile(atPath: path, contents: nil) { return false }
+    guard let fh = FileHandle(forWritingAtPath: path) else { return false }
+    try? fh.close()
+    return true
+}
+
 /// Aggregate a --log survey: per band, the cleanest candidate channel for each hour
 /// of day (congestion is time-of-day dependent — an evening-only scan misleads),
 /// plus the minimax "all-day pick" whose worst hour is the least bad.
@@ -1032,12 +1046,20 @@ func runReport(path: String, app: App) {
         die("cannot read survey log '\(path)'")
     }
     let dec = JSONDecoder()
+    // Drop lines that don't decode (truncated) AND lines that decode but can't be
+    // real (see SurveyScan.plausible) — an impossible RSSI is +inf energy, which
+    // poisons every average and used to kill the run with a conversion trap.
     let scans = raw.split(whereSeparator: \.isNewline)
         .compactMap { try? dec.decode(SurveyScan.self, from: Data($0.utf8)) }
-    if scans.isEmpty { die("no scans in '\(path)' — record some with --log first") }
+        .filter { $0.plausible }
+    if scans.isEmpty { die("no usable scans in '\(path)' — record some with --log first") }
 
     var excl = app.excludeSSIDs
     if let c = app.scanner.currentSSID { excl.insert(c) }
+    // The lookup above is nil in practice here: report mode runs no scan helper and
+    // macOS redacts the SSID from the front-end, so the connected name each scan
+    // recorded for itself is what keeps your own AP out of the ranking.
+    for s in scans { if let c = s.conn { excl.insert(c) } }
 
     let cal = Calendar.current
     let hourly = Survey.byHour(scans) { cal.component(.hour, from: Date(timeIntervalSince1970: $0)) }
@@ -1048,7 +1070,13 @@ func runReport(path: String, app: App) {
     let tsMin = scans.map { $0.ts }.min()!, tsMax = scans.map { $0.ts }.max()!
     print(Ansi.bold("wifiscan survey — \(scans.count) scans, "
         + "\(df.string(from: Date(timeIntervalSince1970: tsMin))) → \(df.string(from: Date(timeIntervalSince1970: tsMax)))"))
-    if !excl.isEmpty { print(Ansi.dim("ignoring your networks: \(excl.sorted().map(sanitizeSSID).joined(separator: ", "))")) }
+    if !excl.isEmpty {
+        print(Ansi.dim("ignoring your networks: \(excl.sorted().map(sanitizeSSID).joined(separator: ", "))"))
+    } else {
+        // Nothing to exclude means the log has no connected SSID in it (it predates
+        // that field) — say so, or a ranking that counts your own AP looks unexplained.
+        print(Ansi.dim("no networks excluded — this log records no connected SSID; pass --exclude-ssid to keep your own AP out"))
+    }
 
     func loadText(_ w: Double) -> String { w > 0 ? "\(Int((10 * log10(w)).rounded()))dBm" : "clean" }
 
@@ -1503,7 +1531,11 @@ func main() {
             app.excludeSSIDs.formUnion(v.split(separator: ",").map(String.init))
         case "--log":
             guard let v = value(), !v.isEmpty else { die("--log needs a file path") }
-            app.logPath = (v as NSString).expandingTildeInPath
+            let p = (v as NSString).expandingTildeInPath
+            guard canWriteSurveyLog(p) else {
+                die("cannot write survey log '\(p)' — check the path and that its directory exists")
+            }
+            app.logPath = p
         case "--report":
             guard let v = value(), !v.isEmpty else { die("--report needs a file path") }
             reportPath = (v as NSString).expandingTildeInPath
@@ -1522,17 +1554,28 @@ func main() {
 
     sweepStaleTempFiles()
 
-    // Restore last-used view settings, then let explicit flags override them.
-    loadPrefs(into: app)
+    let interactive = modes.isEmpty
+
+    // Restore last-used view settings, then let explicit flags override them. TUI
+    // only: --json/--once must be reproducible across machines (the README documents
+    // --json as strongest-first), so yesterday's keystroke in the TUI must not
+    // reorder a script's output. --sort stays the way to change one-shot ordering.
+    if interactive { loadPrefs(into: app) }
     if let b = bandFlag { app.bandFilter = b }
     if let k = sortFlag { app.sortKey = k; app.ascending = false }
 
     // If launched without a terminal to draw to (Finder/Spotlight/Dock), reopen in
     // Terminal. One-shot/pipe modes are exempt — they run headless.
-    let interactive = modes.isEmpty
     if interactive && isatty(STDOUT_FILENO) == 0 {
         relaunchInTerminal()
         return
+    }
+    // The TUI reads keys from stdin and is paced by the terminal's VMIN/VTIME timeout.
+    // With stdin redirected (`wifiscan < /dev/null`) raw mode can't be set, every read
+    // returns EOF instantly, and the loop spins at 100% CPU with no key able to quit it.
+    if interactive && isatty(STDIN_FILENO) == 0 {
+        FileHandle.standardError.write(Data("stdin is not a terminal — the TUI needs one; use --once or --json.\n".utf8))
+        exit(1)
     }
 
     // Diagnostics and one-shot modes must run even with the radio off (that's

@@ -31,6 +31,8 @@ BUNDLE_ID   := com.lucasdaddiego.wifiscan
 # Signing"), then build with:  make SIGN="Your Cert Name"
 SIGN        ?= -
 
+# Swift 6 language mode everywhere (matches Package.swift): strict concurrency checking.
+SWIFTFLAGS  := -swift-version 6
 FRAMEWORKS  := -framework CoreWLAN -framework CoreLocation
 # Release: optimise (-O), strip local symbols (-x), drop dead code (-dead_strip).
 # No -g, so zero debug info. Stripping is at link time, before signing.
@@ -45,7 +47,7 @@ install: ## Build wifiscan.app into ~/Applications + a `wifiscan` launcher on ~/
 	@rm -rf "$(APP)"
 	@mkdir -p "$(APP)/Contents/MacOS" "$(INSTALL_DIR)"
 	cp $(PLIST) "$(APP)/Contents/Info.plist"
-	swiftc $(RELEASE) $(SRC) -o "$(EXE)" $(FRAMEWORKS)
+	swiftc $(SWIFTFLAGS) $(RELEASE) $(SRC) -o "$(EXE)" $(FRAMEWORKS)
 	codesign --force --sign $(SIGN) --identifier $(BUNDLE_ID) "$(APP)"
 	ln -sf "$(EXE)" "$(INSTALL_DIR)/$(BINARY)"
 	-$(LSREGISTER) -f "$(APP)"
@@ -58,12 +60,12 @@ install: ## Build wifiscan.app into ~/Applications + a `wifiscan` launcher on ~/
 	@echo "  3. fully quit Terminal (⌘Q) and reopen, then run \`$(BINARY)\`"
 
 test: ## Build & run the dependency-free core unit tests (no Xcode/XCTest needed)
-	@swiftc -parse-as-library $(TEST_SRC) -o /tmp/wifiscan-tests
+	@swiftc $(SWIFTFLAGS) -parse-as-library $(TEST_SRC) -o /tmp/wifiscan-tests
 	@/tmp/wifiscan-tests
 
 coverage: ## Run the core tests under coverage; fail unless Core.swift is 100% covered
 	@mkdir -p "$(COV_DIR)"
-	@swiftc -profile-generate -profile-coverage-mapping -parse-as-library $(TEST_SRC) -o "$(COV_DIR)/tests"
+	@swiftc $(SWIFTFLAGS) -profile-generate -profile-coverage-mapping -parse-as-library $(TEST_SRC) -o "$(COV_DIR)/tests"
 	@LLVM_PROFILE_FILE="$(COV_DIR)/tests.profraw" "$(COV_DIR)/tests"
 	@xcrun llvm-profdata merge -sparse "$(COV_DIR)/tests.profraw" -o "$(COV_DIR)/tests.profdata"
 	@xcrun llvm-cov report "$(COV_DIR)/tests" -instr-profile="$(COV_DIR)/tests.profdata" $(CORE)

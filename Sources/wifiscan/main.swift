@@ -2,8 +2,8 @@
 //
 // Backend: CoreWLAN (CWWiFiClient) — the only API on modern macOS (airport is
 // gone since 14.4) that returns RSSI / channel / band / width / security for
-// *neighbouring* networks. Requires Location Services permission for the
-// responsible app (Ghostty/iTerm/Terminal) to reveal SSIDs.
+// *neighbouring* networks. SSIDs are revealed only to a Location-authorized app
+// session, which is why scans run in the `open`-launched helper (see ScanDaemon).
 //
 // What macOS will NOT give a third-party binary (and so we don't model): BSSID
 // and country code are gated behind Apple-private entitlements
@@ -61,15 +61,16 @@ final class Scanner {
             let raw = try iface.scanForNetworks(withName: nil)
             let nets = raw.map { n -> BSS in
                 let ch = n.wlanChannel
+                let name = n.ssid ?? ""     // nil or "" both mean cloaked / masked
                 return BSS(
-                    ssid: (n.ssid?.isEmpty == false ? n.ssid! : "‹hidden›"),
+                    ssid: name.isEmpty ? "‹hidden›" : name,
                     rssi: n.rssiValue,
                     noise: n.noiseMeasurement,
                     channel: ch?.channelNumber ?? 0,
                     band: Band.from(ch?.channelBand.rawValue ?? 0),
                     widthMHz: widthCodeToMHz(ch?.channelWidth.rawValue ?? 0),
                     security: Scanner.securityLabel(n),
-                    hidden: (n.ssid?.isEmpty != false),
+                    hidden: name.isEmpty,
                     utilization: qbssUtilization(n.informationElementData)
                 )
             }
@@ -98,7 +99,9 @@ enum Term {
 // MARK: - ANSI
 
 enum Ansi {
-    static var enabled = true
+    /// Set once in main() before any other thread exists, read-only afterwards —
+    /// hence exempt from the Swift 6 global-state check.
+    nonisolated(unsafe) static var enabled = true
     static func wrap(_ s: String, _ code: String) -> String {
         enabled ? "\u{1B}[\(code)m\(s)\u{1B}[0m" : s
     }
@@ -385,7 +388,9 @@ private func renderRecommendations(_ nets: [BSS], excluding: Set<String>) -> [St
 
 // MARK: - App
 
-final class App {
+/// `@unchecked Sendable`: shared with the background scan thread. The fields it
+/// touches are grouped below and guarded by `lock`; the rest are main-thread-only.
+final class App: @unchecked Sendable {
     let scanner = Scanner()
     let lock = NSLock()
 
@@ -483,20 +488,25 @@ final class App {
                 // graceMisses consecutive misses before it's dropped — one bad scan
                 // shouldn't wipe a stable neighbour's trend.
                 let live = Set(result.nets.map { netKey($0) })
-                for key in self.history.keys where !live.contains(key) {
-                    self.historyMiss[key, default: 0] += 1
-                    if self.historyMiss[key]! >= App.graceMisses {
+                // Collect the misses first: removing from `history` while iterating
+                // its keys view would copy the whole dictionary on the first removal.
+                let missing = self.history.keys.filter { !live.contains($0) }
+                for key in missing {
+                    let misses = self.historyMiss[key, default: 0] + 1
+                    if misses >= App.graceMisses {
                         self.history[key] = nil
                         self.historyMiss[key] = nil
+                    } else {
+                        self.historyMiss[key] = misses
                     }
                 }
                 for n in result.nets {
                     let key = netKey(n)
                     self.historyMiss[key] = nil
-                    var h = self.history[key, default: []]
-                    h.append(n.rssi)
-                    if h.count > App.historyLen { h.removeFirst(h.count - App.historyLen) }
-                    self.history[key] = h
+                    self.history[key, default: []].append(n.rssi)
+                    if self.history[key]!.count > App.historyLen {
+                        self.history[key]!.removeFirst()   // ring buffer: one in, one out
+                    }
                 }
             }
             self.scanError = result.error
@@ -530,8 +540,11 @@ final class App {
 
 // MARK: - Terminal raw mode
 
-private var savedTermios = termios()
-private var rawActive: sig_atomic_t = 0
+// Reached from the SIGINT/SIGTERM handler (a C function pointer, no actor), so the
+// compiler can't prove isolation; `nonisolated(unsafe)` states the contract instead:
+// written on the main thread in enterRaw/leaveRaw, read by the handler.
+nonisolated(unsafe) private var savedTermios = termios()
+nonisolated(unsafe) private var rawActive: sig_atomic_t = 0
 
 private func writeRaw(_ s: String) {
     var bytes = Array(s.utf8)
@@ -633,7 +646,7 @@ func runInteractive(app: App) {
     app.triggerScan()
     var lastAuto = Date()
     var lastBeat = Date.distantPast
-    var lastGen = -1, lastCols = 0, lastRows = 0
+    var lastGen = -1
 
     while !app.quit {
         // Heartbeat the persistent helper so it stays alive between scans (the
@@ -649,15 +662,16 @@ func runInteractive(app: App) {
             if app.triggerScan() { lastAuto = Date() }
         }
         // Redraw only when something actually changed — input, scan state, or a
-        // resize. Otherwise the loop just idles in readKey() at ~0% CPU. While a scan
-        // is in flight we also tick the spinner so it animates (~10 fps via VTIME).
+        // resize (draw() records the size it last painted at, so compare against
+        // that). Otherwise the loop just idles in readInput() at ~0% CPU. While a
+        // scan is in flight we also tick the spinner so it animates (~10 fps via VTIME).
         let sz = termSize()
         let gen = app.readGeneration()
         let scanning = app.isScanning()
         if scanning { app.spinnerTick &+= 1 }
-        if gen != lastGen || sz.cols != lastCols || sz.rows != lastRows || scanning {
+        if gen != lastGen || sz.cols != app.lastCols || sz.rows != app.lastRows || scanning {
             draw(app)
-            lastGen = gen; lastCols = sz.cols; lastRows = sz.rows
+            lastGen = gen
         }
         switch readInput() {
         case .key(let k):   handleKey(k, app: app)
@@ -1014,15 +1028,17 @@ func savePrefs(_ app: App) {
 /// Append one scan to the JSONL survey log (one SurveyScan object per line).
 func appendSurveyLog(_ path: String, nets: [BSS], conn: String?) {
     let scan = SurveyScan(ts: Date().timeIntervalSince1970, nets: nets.map(SurveyNet.init), conn: conn)
-    guard let data = try? JSONEncoder().encode(scan) else { return }
+    guard var line = try? JSONEncoder().encode(scan) else { return }
+    line.append(UInt8(ascii: "\n"))
     if !FileManager.default.fileExists(atPath: path) {
         FileManager.default.createFile(atPath: path, contents: nil)
     }
     guard let fh = FileHandle(forWritingAtPath: path) else { return }
     defer { try? fh.close() }
+    // One write per line, so a concurrent reader (`--report` on a live log) never
+    // sees a record without its terminator.
     _ = try? fh.seekToEnd()
-    fh.write(data)
-    fh.write(Data("\n".utf8))
+    try? fh.write(contentsOf: line)
 }
 
 /// Can we actually append to the --log path? Run once at startup, because
@@ -1113,48 +1129,35 @@ func runReport(path: String, app: App) {
 // and sees real SSIDs. We keep one such helper alive (the persistent daemon below)
 // and hand results back as JSON over a per-front-end control dir.
 
-struct ScanRecord: Codable {
-    let ssid: String, rssi: Int, noise: Int, channel: Int
-    let band: Int, widthMHz: Int, security: String, hidden: Bool
-    let utilization: Double?
-}
+/// One scan result as the helper hands it back (BSS is Codable, so the networks
+/// travel verbatim — no separate wire struct to keep in sync).
 struct ScanFile: Codable {
     let error: String?
     let status: String?
     let conn: String?          // the helper's view of the connected SSID (see triggerScan)
-    let nets: [ScanRecord]
-}
-private func record(_ b: BSS) -> ScanRecord {
-    ScanRecord(ssid: b.ssid, rssi: b.rssi, noise: b.noise, channel: b.channel,
-               band: b.band.rawValue, widthMHz: b.widthMHz, security: b.security, hidden: b.hidden,
-               utilization: b.utilization)
-}
-private func bss(_ r: ScanRecord) -> BSS {
-    BSS(ssid: r.ssid, rssi: r.rssi, noise: r.noise, channel: r.channel,
-        band: Band.from(r.band), widthMHz: r.widthMHz, security: r.security, hidden: r.hidden,
-        utilization: r.utilization)
+    let nets: [BSS]
 }
 
 /// Resolve the real .app bundle path. Bundle.main is unreliable when we're invoked
 /// through the ~/.bin/wifiscan symlink (it reports the symlink's directory), so we
 /// resolve the actual executable and walk up to the enclosing ".app".
 private func appBundlePath() -> String {
-    var size: UInt32 = 4096
-    var buf = [CChar](repeating: 0, count: Int(size))
-    var exe = Bundle.main.executablePath ?? (CommandLine.arguments.first ?? "")
-    let rc = _NSGetExecutablePath(&buf, &size)
-    if rc == 0 {
-        exe = String(cString: buf)
-    } else if rc == -1 {
-        // Buffer too small; `size` now holds the required length — retry once.
-        buf = [CChar](repeating: 0, count: Int(size))
-        if _NSGetExecutablePath(&buf, &size) == 0 { exe = String(cString: buf) }
-    }
+    let exe = executablePath() ?? Bundle.main.executablePath ?? CommandLine.arguments[0]
     var u = URL(fileURLWithPath: exe).resolvingSymlinksInPath()   // follow the symlink into the bundle
     while u.pathExtension != "app" && u.path != "/" {
         u = u.deletingLastPathComponent()
     }
     return u.pathExtension == "app" ? u.path : Bundle.main.bundlePath
+}
+
+/// The running executable's path straight from the kernel (`_NSGetExecutablePath`).
+/// Sized in two calls: a nil buffer just reports the length needed.
+private func executablePath() -> String? {
+    var size: UInt32 = 0
+    _ = _NSGetExecutablePath(nil, &size)
+    var buf = [CChar](repeating: 0, count: Int(size))
+    guard _NSGetExecutablePath(&buf, &size) == 0 else { return nil }
+    return buf.withUnsafeBufferPointer { String(cString: $0.baseAddress!) }
 }
 
 // MARK: Atomic file IPC helpers
@@ -1180,9 +1183,13 @@ private func processAlive(_ pid: pid_t) -> Bool { pid > 0 && kill(pid, 0) == 0 }
 // The helper stays a LaunchServices app session (so SSIDs reveal exactly as the
 // per-scan helper did) and pays the Location settle only once, at startup.
 
-private var helperPidGlobal: pid_t = 0   // mirrored so the signal handler can SIGTERM it on exit
+/// Mirror of HelperClient.helperPid so the signal handler can SIGTERM the helper on
+/// exit. Written on the scan thread (under HelperClient.lock), read by the handler —
+/// a single aligned pid_t store, which is the most a signal handler can rely on.
+nonisolated(unsafe) private var helperPidGlobal: pid_t = 0
 
-final class HelperClient {
+/// `@unchecked Sendable`: every mutable field is guarded by `lock` (see each method).
+final class HelperClient: @unchecked Sendable {
     static let shared = HelperClient()
     private let dir = NSTemporaryDirectory() + "wifiscan-daemon-\(getpid())/"
     private let lock = NSLock()
@@ -1243,7 +1250,7 @@ final class HelperClient {
                     if let data = FileManager.default.contents(atPath: dir + "scan-\(mySeq).json"),
                        let f = try? JSONDecoder().decode(ScanFile.self, from: data) {
                         try? FileManager.default.removeItem(atPath: dir + "scan-\(mySeq).json")
-                        return (f.nets.map(bss), f.error, f.status, f.conn)
+                        return (f.nets, f.error, f.status, f.conn)
                     }
                     usleep(10_000)
                 }
@@ -1314,7 +1321,10 @@ final class ScanDaemon: NSObject, CLLocationManagerDelegate {
         mgr.requestWhenInUseAuthorization()
         mgr.startUpdatingLocation()
         startTime = Date(); lastActivity = Date()
-        Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [self] _ in tick() }
+        // Target/selector rather than a block: the block form is @Sendable, and this
+        // object is main-run-loop-only, not Sendable.
+        Timer.scheduledTimer(timeInterval: 0.1, target: self, selector: #selector(tick),
+                             userInfo: nil, repeats: true)
         RunLoop.current.run()
     }
 
@@ -1328,7 +1338,7 @@ final class ScanDaemon: NSObject, CLLocationManagerDelegate {
         }
     }
 
-    private func tick() {
+    @objc private func tick() {
         let now = Date()
         if !settled {     // one-time Location settle, same as the per-scan helper
             if now.timeIntervalSince(startTime) >= 1.0 { settled = true } else { return }
@@ -1336,7 +1346,7 @@ final class ScanDaemon: NSObject, CLLocationManagerDelegate {
         if let reqSeq = readIntFile(dir + "req"), reqSeq > lastDone {
             let r = scanner.scan()
             let out = ScanFile(error: r.error, status: authStatus(),
-                               conn: scanner.currentSSID, nets: r.nets.map(record))
+                               conn: scanner.currentSSID, nets: r.nets)
             if let data = try? JSONEncoder().encode(out) {
                 try? data.write(to: URL(fileURLWithPath: dir + "scan-\(reqSeq).json"), options: .atomic)
             }

@@ -11,7 +11,7 @@
 
 import Foundation
 
-var checks = 0, failures = 0
+nonisolated(unsafe) var checks = 0, failures = 0   // single-threaded tally
 func ok(_ cond: Bool, _ msg: String) {
     checks += 1
     if !cond { failures += 1; print("FAIL: \(msg)") }
@@ -86,6 +86,18 @@ func order(_ nets: [BSS]) -> String { nets.map { $0.ssid }.joined() }
         ok(s0.lo == 5170 && s0.hi == 5190, "freqSpan unknown width treated as 20 MHz")
         let su = mk("x", -50, 0, .unknown, 20).freqSpan      // unknown band folds around centerFreq 0
         ok(su.lo == -10 && su.hi == 10, "freqSpan unknown band folds around 0")
+
+        // Codable: the scan helper ships BSS values back over JSON verbatim, so every
+        // stored field must survive the trip (band as its raw Int, optional airtime).
+        let wire = mk("Café 你好", -61, 100, .ghz5, 160, noise: -92, sec: "WPA2/3", hidden: true, util: 0.42)
+        let json = try! JSONEncoder().encode(wire)
+        let back = try! JSONDecoder().decode(BSS.self, from: json)
+        ok(back.ssid == wire.ssid && back.rssi == -61 && back.noise == -92 && back.channel == 100
+           && back.band == .ghz5 && back.widthMHz == 160 && back.security == "WPA2/3"
+           && back.hidden && back.utilization == 0.42, "BSS round-trips through JSON")
+        let noUtil = try! JSONDecoder().decode(BSS.self, from: Data(
+            #"{"ssid":"x","rssi":-50,"noise":0,"channel":1,"band":1,"widthMHz":20,"security":"Open","hidden":false}"#.utf8))
+        ok(noUtil.utilization == nil && noUtil.band == .ghz24, "BSS decodes with utilization absent")
     }
 
     // MARK: Band
@@ -461,6 +473,8 @@ func order(_ nets: [BSS]) -> String { nets.map { $0.ssid }.joined() }
         eq(charDisplayWidth("\u{200B}"), 0, "zero-width space → 0 width")     // 0x200B…0x200F
         eq(charDisplayWidth("\u{FEFF}"), 0, "BOM / zero-width no-break → 0")
         eq(charDisplayWidth("A"), 1, "ascii → 1 width")
+        eq(charDisplayWidth("é"), 1, "Latin-1 (below the U+0300 fast-path bound) → 1 width")
+        eq(charDisplayWidth("Ж"), 1, "Cyrillic (above the bound, not a mark, not wide) → 1 width")
         eq(charDisplayWidth("你"), 2, "CJK → 2 width")
         eq(charDisplayWidth("😀"), 2, "emoji → 2 width")
         eq(charDisplayWidth("🇬🇧"), 2, "flag (regional indicators) → 2 width")

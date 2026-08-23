@@ -447,7 +447,8 @@ Makefile.local                optional, git-ignored: machine-local SIGN identity
 ```
 
 No third‑party dependencies — just the system **CoreWLAN**, **CoreLocation** and
-**Foundation** frameworks.
+**Foundation** frameworks. Builds in **Swift 6 language mode** (strict concurrency
+checking; Swift 6.0+ toolchain, i.e. Xcode 16 / CLT 16 or newer).
 
 ## Development
 
@@ -455,8 +456,8 @@ No third‑party dependencies — just the system **CoreWLAN**, **CoreLocation**
 make                       # build + sign + install (≡ make install)
 make test                  # run the core unit tests (no Xcode/XCTest needed — CLT only)
 make coverage              # run tests under llvm-cov; fails unless Core.swift is 100% covered
-swiftc Sources/wifiscan/Core.swift Sources/wifiscan/main.swift -o /tmp/wifiscan \
-    -framework CoreWLAN -framework CoreLocation     # quick type-check / compile
+swiftc -swift-version 6 Sources/wifiscan/Core.swift Sources/wifiscan/main.swift \
+    -o /tmp/wifiscan -framework CoreWLAN -framework CoreLocation   # quick compile
 wifiscan --diag            # verify scanning + permission
 ```
 

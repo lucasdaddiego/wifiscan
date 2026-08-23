@@ -1,13 +1,10 @@
-// swift-tools-version:5.9
+// swift-tools-version:6.0
 import PackageDescription
 
 let package = Package(
     name: "wifiscan",
     platforms: [.macOS(.v12)],
     targets: [
-        .executableTarget(
-            name: "wifiscan",
-            path: "Sources/wifiscan"
-        )
+        .executableTarget(name: "wifiscan")
     ]
 )

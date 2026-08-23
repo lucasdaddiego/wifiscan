@@ -8,7 +8,9 @@ import Foundation
 
 // MARK: - Model
 
-struct BSS {
+/// One scanned network. Codable so the out-of-process scan helper can hand results
+/// back as JSON verbatim (the computed properties below are not encoded).
+struct BSS: Codable {
     var ssid: String
     var rssi: Int          // dBm
     var noise: Int         // dBm (0 == not measured by macOS for this BSS)
@@ -47,7 +49,7 @@ struct BSS {
     }
 }
 
-enum Band: Int {
+enum Band: Int, Codable {
     case unknown = 0, ghz24 = 1, ghz5 = 2, ghz6 = 3
 
     var label: String {
@@ -168,19 +170,25 @@ enum Analysis {
     /// recommendation away from its current channel.
     static func loads(_ nets: [BSS], band: Band, candidates: [Int],
                       excluding: Set<String> = []) -> [ChannelLoad] {
-        let inBand = nets.filter { $0.band == band && !excluding.contains($0.ssid) }
+        // Per-AP figures are independent of the candidate, so derive them once here
+        // rather than once per (candidate × AP) pair: freqSpan walks the bonding
+        // tables and linearPower is a pow(), and this runs on every TUI frame.
+        let aps: [(lo: Double, hi: Double, energy: Double, rssi: Int)] = nets.compactMap { ap in
+            guard ap.band == band, !excluding.contains(ap.ssid) else { return nil }
+            let s = ap.freqSpan
+            let airtime = ap.utilization.map { max(0.1, $0) } ?? 1.0
+            return (s.lo, s.hi, ap.linearPower * airtime, ap.rssi)
+        }
         return candidates.map { cand in
             let fc = Band.centerFreq(band, cand)
             let span = (lo: fc - 10.0, hi: fc + 10.0)
             var load = ChannelLoad(channel: cand)
-            for ap in inBand {
-                let s = ap.freqSpan
-                let overlap = min(s.hi, span.hi) - max(s.lo, span.lo)
+            for ap in aps {
+                let overlap = min(ap.hi, span.hi) - max(ap.lo, span.lo)
                 guard overlap > 0 else { continue }
-                let widthFrac = overlap / (s.hi - s.lo)   // slice of the AP's PSD in this slot
-                let airtime = ap.utilization.map { max(0.1, $0) } ?? 1.0
+                let widthFrac = overlap / (ap.hi - ap.lo)   // slice of the AP's PSD in this slot
                 load.apCount += 1
-                load.weighted += ap.linearPower * widthFrac * airtime
+                load.weighted += ap.energy * widthFrac
                 load.strongest = max(load.strongest, ap.rssi)
             }
             return load
@@ -365,18 +373,16 @@ func netTieBreak(_ a: BSS, _ b: BSS, by key: SortKey) -> Bool {
     key == .power ? a.ssid < b.ssid : a.rssi > b.rssi
 }
 
-/// Strict "a before b" for `key`'s default direction — primary, then tie-break.
-func netBefore(_ a: BSS, _ b: BSS, by key: SortKey) -> Bool {
+/// Strict "a before b" for `key` — primary (flipped when `ascending`), then the
+/// direction-independent tie-break.
+func netBefore(_ a: BSS, _ b: BSS, by key: SortKey, ascending: Bool = false) -> Bool {
     let p = netPrimary(a, b, by: key)
-    return p != 0 ? p < 0 : netTieBreak(a, b, by: key)
+    if p != 0 { return ascending ? p > 0 : p < 0 }
+    return netTieBreak(a, b, by: key)
 }
 
 func sortNets(_ nets: [BSS], by key: SortKey, ascending: Bool) -> [BSS] {
-    nets.sorted { a, b in
-        let p = netPrimary(a, b, by: key)
-        if p != 0 { return ascending ? p > 0 : p < 0 }
-        return netTieBreak(a, b, by: key)
-    }
+    nets.sorted { netBefore($0, $1, by: key, ascending: ascending) }
 }
 
 // MARK: - CoreWLAN value mappings (kept here so they're unit-testable without the framework)
@@ -449,28 +455,33 @@ func lerpRGB(_ x: Double, _ stops: [(at: Double, rgb: RGB)]) -> RGB {
     return stops.last!.rgb
 }
 
-/// Signal → smooth 24-bit colour by dBm: red (weak) → amber → green (strong).
-/// The stop positions mirror signalColorCode's buckets so the two paths agree.
-func signalRGB(_ rssi: Int) -> RGB {
-    lerpRGB(Double(rssi), [
-        (-85, (220,  60,  55)),   // red
-        (-75, (235, 140,  45)),   // orange
-        (-67, (228, 210,  70)),   // yellow
-        (-60, (120, 205,  80)),   // green
-        (-50, ( 60, 220,  95)),   // bright green
-    ])
-}
+// Stop tables live at file scope so the per-cell colour calls below don't rebuild
+// (heap-allocate) them on every invocation — they run for every coloured cell of
+// every frame.
 
-/// Congestion fraction (0 = quiet → 1 = busiest in band) → green → red, matching
-/// loadColor's buckets.
-func congestionRGB(_ frac: Double) -> RGB {
-    lerpRGB(max(0, min(1, frac)), [
-        (0.00, ( 70, 200,  90)),   // green — quiet
-        (0.45, (228, 210,  70)),   // yellow
-        (0.70, (235, 140,  45)),   // orange
-        (1.00, (220,  60,  55)),   // red — most congested
-    ])
-}
+/// dBm stops: red (weak) → amber → green (strong). The positions mirror
+/// signalColorCode's buckets so the two paths agree.
+private let signalStops: [(at: Double, rgb: RGB)] = [
+    (-85, (220,  60,  55)),   // red
+    (-75, (235, 140,  45)),   // orange
+    (-67, (228, 210,  70)),   // yellow
+    (-60, (120, 205,  80)),   // green
+    (-50, ( 60, 220,  95)),   // bright green
+]
+
+/// Congestion-fraction stops: green (quiet) → red (busiest), matching loadColor's buckets.
+private let congestionStops: [(at: Double, rgb: RGB)] = [
+    (0.00, ( 70, 200,  90)),   // green — quiet
+    (0.45, (228, 210,  70)),   // yellow
+    (0.70, (235, 140,  45)),   // orange
+    (1.00, (220,  60,  55)),   // red — most congested
+]
+
+/// Signal → smooth 24-bit colour by dBm.
+func signalRGB(_ rssi: Int) -> RGB { lerpRGB(Double(rssi), signalStops) }
+
+/// Congestion fraction (0 = quiet → 1 = busiest in band) → green → red.
+func congestionRGB(_ frac: Double) -> RGB { lerpRGB(max(0, min(1, frac)), congestionStops) }
 
 // MARK: - Sub-cell bars (Unicode eighth-blocks)
 
@@ -539,6 +550,17 @@ func bandColorCode(_ b: Band) -> Int {
 // count as one Character, so padding by `.count` misaligns the table. These
 // helpers measure and truncate by display width instead.
 
+/// Wide / fullwidth scalar ranges (CJK, Hangul, fullwidth forms, emoji planes,
+/// flags). File-scope so charDisplayWidth — called per character of every cell of
+/// every frame — doesn't allocate this table on each call.
+private let wideRanges: [ClosedRange<UInt32>] = [
+    0x1100...0x115F, 0x2329...0x232A, 0x2E80...0x303E, 0x3041...0x33FF,
+    0x3400...0x4DBF, 0x4E00...0x9FFF, 0xA000...0xA4CF, 0xAC00...0xD7A3,
+    0xF900...0xFAFF, 0xFE10...0xFE19, 0xFE30...0xFE6F, 0xFF00...0xFF60,
+    0xFFE0...0xFFE6, 0x1F1E6...0x1F1FF, 0x1F300...0x1FAFF, 0x1F900...0x1F9FF,
+    0x20000...0x3FFFD,
+]
+
 /// Approximate East-Asian display width of a single Character (0/1/2 cells).
 func charDisplayWidth(_ c: Character) -> Int {
     // A Character is a grapheme cluster of ≥1 scalar, so .first is never nil; the
@@ -546,20 +568,16 @@ func charDisplayWidth(_ c: Character) -> Int {
     let s = c.unicodeScalars.first!
     let v = s.value
     if v == 0 { return 0 }
+    // Fast path: everything below U+0300 (ASCII, Latin-1, Latin Extended) is one
+    // cell — the first combining mark is U+0300 and the first wide range U+1100 —
+    // so the bulk of real SSIDs skip the Unicode property lookup below entirely.
+    if v < 0x300 { return 1 }
     // Zero-width: combining marks of ANY script (Mn/Me — accents, Hebrew/Arabic
     // points, variation selectors, …) plus the zero-width format scalars.
     let cat = s.properties.generalCategory
     if cat == .nonspacingMark || cat == .enclosingMark { return 0 }
     if (0x200B...0x200F).contains(v) || v == 0xFEFF { return 0 }
-    // Wide / fullwidth ranges (CJK, Hangul, fullwidth forms, emoji planes, flags).
-    let wide: [ClosedRange<UInt32>] = [
-        0x1100...0x115F, 0x2329...0x232A, 0x2E80...0x303E, 0x3041...0x33FF,
-        0x3400...0x4DBF, 0x4E00...0x9FFF, 0xA000...0xA4CF, 0xAC00...0xD7A3,
-        0xF900...0xFAFF, 0xFE10...0xFE19, 0xFE30...0xFE6F, 0xFF00...0xFF60,
-        0xFFE0...0xFFE6, 0x1F1E6...0x1F1FF, 0x1F300...0x1FAFF, 0x1F900...0x1F9FF,
-        0x20000...0x3FFFD,
-    ]
-    for r in wide where r.contains(v) { return 2 }
+    for r in wideRanges where r.contains(v) { return 2 }
     return 1
 }
 

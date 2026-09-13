@@ -546,9 +546,29 @@ final class App: @unchecked Sendable {
 nonisolated(unsafe) private var savedTermios = termios()
 nonisolated(unsafe) private var rawActive: sig_atomic_t = 0
 
+// The leave sequence, plus the same bytes in a plain C buffer: mouse reporting off ·
+// show cursor · leave the alt screen · restore the window title. prepareSignalSafeLeave()
+// fills the buffer so the signal handler never has to build it (see leaveRawFromSignal).
+private let leaveSequence = "\u{1B}[?1006l\u{1B}[?1000l\u{1B}[?25h\u{1B}[?1049l\u{1B}[23;2t"
+nonisolated(unsafe) private var leaveBytes: UnsafeMutablePointer<UInt8>?
+nonisolated(unsafe) private var leaveByteCount = 0
+
 private func writeRaw(_ s: String) {
     var bytes = Array(s.utf8)
     _ = write(STDOUT_FILENO, &bytes, bytes.count)
+}
+
+/// Snapshot the leave sequence into a plain C buffer. MUST run before the signal
+/// handlers are installed — building it inside a handler is the very thing
+/// leaveRawFromSignal exists to avoid. Allocated once and owned for the life of the
+/// process.
+private func prepareSignalSafeLeave() {
+    guard leaveBytes == nil else { return }
+    let bytes = Array(leaveSequence.utf8)
+    let buf = UnsafeMutablePointer<UInt8>.allocate(capacity: bytes.count)
+    buf.update(from: bytes, count: bytes.count)
+    leaveBytes = buf
+    leaveByteCount = bytes.count
 }
 
 private func enterRaw() {
@@ -572,15 +592,38 @@ private func enterRaw() {
     writeRaw("\u{1B}[?1049h\u{1B}[?25l\u{1B}[22;2t\u{1B}[?1000h\u{1B}[?1006h")
 }
 
-/// Async-signal-safe: uses only write() and tcsetattr() (both on the POSIX
-/// async-signal-safe list) — never stdio — so it is safe to call from a signal
-/// handler as well as the normal exit path. Idempotent via rawActive.
+/// The normal exit path (end of the loop, atexit): mirror enterRaw in reverse —
+/// disable mouse · show cursor + main screen · restore the saved window title — then
+/// put the termios back. Idempotent via rawActive. NOT for a signal handler: writeRaw's
+/// `Array(s.utf8)` mallocs — see leaveRawFromSignal.
 private func leaveRaw() {
     guard rawActive != 0 else { return }
     rawActive = 0
-    // Mirror enterRaw in reverse: disable mouse · show cursor + main screen · restore
-    // the saved window title. All async-signal-safe (write only).
-    writeRaw("\u{1B}[?1006l\u{1B}[?1000l\u{1B}[?25h\u{1B}[?1049l\u{1B}[23;2t")
+    writeRaw(leaveSequence)
+    tcsetattr(STDIN_FILENO, TCSANOW, &savedTermios)
+}
+
+/// leaveRaw for a SIGNAL HANDLER: the same restore, but async-signal-safe. It touches
+/// only write(2) and tcsetattr(2) over the buffer prepareSignalSafeLeave() built up
+/// front — never the String path, because writeRaw's `Array(s.utf8)` mallocs and draw()
+/// keeps the interrupted thread inside malloc many times a second. A handler that
+/// re-enters libmalloc's lock never returns, `_exit(0)` is never reached, and the user
+/// is left with a wedged terminal (alt screen up, ECHO/ICANON/ISIG off, mouse reporting
+/// on) that needs a `kill -9` from another window and a `reset`. Ctrl-C does NOT arrive
+/// here (ISIG is cleared, so 0x03 comes through as a byte) — `kill`, a teardown script
+/// or a logout does.
+private func leaveRawFromSignal() {
+    guard rawActive != 0 else { return }
+    rawActive = 0
+    if let p = leaveBytes {
+        var off = 0
+        while off < leaveByteCount {
+            let n = write(STDOUT_FILENO, p + off, leaveByteCount - off)
+            if n < 0 { if errno == EINTR { continue }; break }
+            if n == 0 { break }
+            off += n
+        }
+    }
     tcsetattr(STDIN_FILENO, TCSANOW, &savedTermios)
 }
 
@@ -630,14 +673,15 @@ private func readInput() -> Input {
 // MARK: - Interactive loop
 
 func runInteractive(app: App) {
-    // Install restore-on-signal BEFORE mutating terminal state (closes the
-    // startup race). leaveRaw() is async-signal-safe; _exit() skips stdio+atexit.
+    prepareSignalSafeLeave()   // before the handlers: they must never build it themselves
+    // Install restore-on-signal BEFORE mutating terminal state (closes the startup
+    // race). leaveRawFromSignal() is async-signal-safe; _exit() skips stdio+atexit.
     for sig in [SIGINT, SIGTERM] {
         signal(sig) { _ in
-            // kill() is async-signal-safe; reap the persistent helper on Ctrl-C so
-            // it doesn't linger (it would self-exit on heartbeat loss anyway).
+            // kill() is async-signal-safe; reap the persistent helper on SIGTERM/SIGINT
+            // so it doesn't linger (it would self-exit on heartbeat loss anyway).
             if helperPidGlobal > 0 { kill(helperPidGlobal, SIGTERM) }
-            leaveRaw(); _exit(0)
+            leaveRawFromSignal(); _exit(0)
         }
     }
     atexit { leaveRaw() }

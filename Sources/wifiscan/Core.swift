@@ -258,14 +258,24 @@ struct SurveyScan: Codable {
         self.ts = ts; self.nets = nets; self.conn = conn
     }
 
-    /// True when every logged RSSI is a physically possible one. A survey log is a
-    /// plain text file, so a hand-edited or corrupted line can decode as well-formed
-    /// JSON while carrying nonsense — and rssi is the field that does damage, because
-    /// linearPower is 10^(rssi/10): past ~3080 dBm it overflows to +inf, poisons every
-    /// average it lands in and traps the Int conversion that formats it as dB. A
-    /// received signal is never above 0 dBm, so anything that is means the line is
-    /// junk and `--report` drops it exactly as it drops a truncated one.
-    var plausible: Bool { nets.allSatisfy { $0.rssi <= 0 } }
+    /// True when every logged RSSI, width and utilization is a physically possible one.
+    /// A survey log is a plain text file, so a hand-edited or corrupted line can decode
+    /// as well-formed JSON while carrying nonsense, and three fields do damage:
+    /// - rssi: linearPower is 10^(rssi/10), so past ~3080 dBm it overflows to +inf,
+    ///   poisons every average it lands in and traps the Int conversion that formats it
+    ///   as dB. A received signal is never above 0 dBm.
+    /// - widthMHz: the 6 GHz bonding table builds one slot per 20 MHz of width, so a
+    ///   huge width stalls or crashes the run. No Wi-Fi channel is wider than 320 MHz.
+    /// - utilization: it scales the energy, so a huge one hits the same +inf trap as
+    ///   rssi. QBSS load is a fraction, 0…1.
+    /// Any of them out of range means the line is junk, and `--report` drops it exactly
+    /// as it drops a truncated one.
+    var plausible: Bool {
+        nets.allSatisfy {
+            $0.rssi <= 0 && (0...320).contains($0.widthMHz)
+                && $0.utilization.map { (0...1).contains($0) } ?? true
+        }
+    }
 }
 
 enum Survey {
@@ -367,10 +377,22 @@ func netPrimary(_ a: BSS, _ b: BSS, by key: SortKey) -> Int {
 }
 
 /// Tie-break for primary-equal pairs: strongest RSSI first (name A→Z for power,
-/// whose primary IS the RSSI). Direction-independent, so ties read identically
+/// whose primary IS the RSSI), then every other field, so only identical rows tie.
+/// Without the field pass, two networks with the same name and signal (a mesh, a
+/// dual-band AP) kept whatever order the scan returned them in, and `--json`
+/// reordered them between runs. Direction-independent, so ties read identically
 /// whichever way the primary is flipped.
 func netTieBreak(_ a: BSS, _ b: BSS, by key: SortKey) -> Bool {
-    key == .power ? a.ssid < b.ssid : a.rssi > b.rssi
+    if key == .power, a.ssid != b.ssid { return a.ssid < b.ssid }
+    if a.rssi != b.rssi { return a.rssi > b.rssi }
+    if a.ssid != b.ssid { return a.ssid < b.ssid }
+    if a.channel != b.channel { return a.channel < b.channel }
+    if a.band != b.band { return a.band.rawValue < b.band.rawValue }
+    if a.widthMHz != b.widthMHz { return a.widthMHz > b.widthMHz }
+    if a.security != b.security { return a.security < b.security }
+    if a.noise != b.noise { return a.noise < b.noise }
+    if a.hidden != b.hidden { return !a.hidden }
+    return (a.utilization ?? -1) > (b.utilization ?? -1)
 }
 
 /// Strict "a before b" for `key` — primary (flipped when `ascending`), then the

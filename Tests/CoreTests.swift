@@ -303,6 +303,42 @@ func order(_ nets: [BSS]) -> String { nets.map { $0.ssid }.joined() }
         ok(netBefore(mk("x", -40, 1, .ghz24, util: 0.3), mk("y", -50, 1, .ghz24, util: 0.3), by: .util),
            "equal load → stronger rssi first")
 
+        // Total order: rows that tie on the key AND on name + signal (a mesh, a dual-band
+        // AP) kept the scan's arbitrary order, so --json reordered them between runs.
+        // Every remaining field now breaks the tie: input order must never show.
+        let twins = [mk("Mesh", -50, 36, .ghz5, 80), mk("Mesh", -50, 1, .ghz24),
+                     mk("Mesh", -50, 149, .ghz5, 80), mk("Mesh", -50, 36, .ghz5, 40),
+                     mk("Mesh", -50, 36, .ghz5, 80, sec: "WPA3"), mk("Mesh", -50, 36, .ghz5, 80, noise: -90)]
+        func sig(_ ns: [BSS]) -> String {
+            ns.map { "\($0.channel)/\($0.band.rawValue)/\($0.widthMHz)/\($0.security)/\($0.noise)" }.joined(separator: " ")
+        }
+        for key in [SortKey.power, .snr, .channel, .name, .band, .width, .security, .util] {
+            for asc in [false, true] {
+                eq(sig(sortNets(twins, by: key, ascending: asc)),
+                   sig(sortNets(Array(twins.reversed()), by: key, ascending: asc)),
+                   "\(key.label) \(asc ? "asc" : "desc"): ties do not depend on scan order")
+            }
+        }
+        // Each field of the final tie-break, in both argument orders.
+        let base = mk("n", -50, 36, .ghz5, 80, noise: -90, util: 0.5)
+        let differing: [(String, BSS)] = [
+            ("ssid", mk("o", -50, 36, .ghz5, 80, noise: -90, util: 0.5)),
+            ("channel", mk("n", -50, 40, .ghz5, 80, noise: -90, util: 0.5)),
+            ("band", mk("n", -50, 36, .ghz6, 80, noise: -90, util: 0.5)),
+            ("width", mk("n", -50, 36, .ghz5, 40, noise: -90, util: 0.5)),
+            ("security", mk("n", -50, 36, .ghz5, 80, noise: -90, sec: "WPA3", util: 0.5)),
+            ("noise", mk("n", -50, 36, .ghz5, 80, noise: -80, util: 0.5)),
+            ("hidden", mk("n", -50, 36, .ghz5, 80, noise: -90, hidden: true, util: 0.5)),
+            ("utilization", mk("n", -50, 36, .ghz5, 80, noise: -90, util: 0.2)),
+            ("no utilization", mk("n", -50, 36, .ghz5, 80, noise: -90)),
+        ]
+        for (field, other) in differing {
+            ok(netTieBreak(base, other, by: .channel), "\(field) breaks the tie (base first)")
+            ok(!netTieBreak(other, base, by: .channel), "\(field) breaks the tie (other second)")
+        }
+        ok(!netTieBreak(base, base, by: .channel) && !netTieBreak(base, base, by: .power),
+           "only identical rows tie")
+
         // SortKey labels
         eq(SortKey.power.label, "Power", "sortkey power label")
         eq(SortKey.snr.label, "SNR", "sortkey snr label")
@@ -384,6 +420,22 @@ func order(_ nets: [BSS]) -> String { nets.map { $0.ssid }.joined() }
            "impossible positive RSSI → implausible line")
         ok(!SurveyScan(ts: 0, nets: [SurveyNet(mk("ok", -50, 36, .ghz5)), SurveyNet(mk("bad", 1, 36, .ghz5))]).plausible,
            "one junk row condemns the line")
+        // Width and utilization can be corrupt too. A huge 6 GHz width makes the bonding
+        // table build one slot per 20 MHz of it (2^40 MHz → billions: a stall or a crash),
+        // and a huge utilization scales energy to +inf (the same dB trap as RSSI).
+        func one(w: Int = 20, util: Double? = nil) -> SurveyScan {
+            SurveyScan(ts: 0, nets: [SurveyNet(mk("A", -50, 37, .ghz6, w, util: util))])
+        }
+        ok(one(w: 0).plausible, "width 0 (unknown) is plausible")
+        ok(one(w: 320).plausible, "320 MHz (Wi-Fi 7) is plausible")
+        ok(!one(w: 1 << 40).plausible, "absurd width → implausible line")
+        ok(!one(w: 640).plausible, "wider than any Wi-Fi channel → implausible")
+        ok(!one(w: -20).plausible, "negative width → implausible")
+        ok(one(util: nil).plausible, "no utilization is plausible")
+        ok(one(util: 0).plausible && one(util: 1).plausible, "utilization 0 and 1 are the bounds")
+        ok(!one(util: 1e308).plausible, "absurd utilization → implausible line")
+        ok(!one(util: -0.5).plausible, "negative utilization → implausible")
+        ok(!one(util: .nan).plausible, "NaN utilization → implausible")
 
         // averageLoads: mean energy per scan (busy scan + empty scan → half), peak counts.
         let ap = mk("x", -50, 36, .ghz5)

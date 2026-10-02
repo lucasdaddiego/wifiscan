@@ -1105,8 +1105,9 @@ func runReport(path: String, app: App) {
     }
     let dec = JSONDecoder()
     // Drop lines that don't decode (truncated) AND lines that decode but can't be
-    // real (see SurveyScan.plausible) — an impossible RSSI is +inf energy, which
-    // poisons every average and used to kill the run with a conversion trap.
+    // real (see SurveyScan.plausible) — an impossible RSSI or utilization is +inf
+    // energy, which poisons every average and used to kill the run with a conversion
+    // trap, and an impossible width stalls the 6 GHz bonding table.
     let scans = raw.split(whereSeparator: \.isNewline)
         .compactMap { try? dec.decode(SurveyScan.self, from: Data($0.utf8)) }
         .filter { $0.plausible }

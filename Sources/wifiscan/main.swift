@@ -839,8 +839,8 @@ func draw(_ app: App) {
     // from genuinely hidden (cloaked) APs using the helper's reported status.
     let hidden = snap.nets.filter { $0.hidden }.count
     if !snap.nets.isEmpty && hidden > 0 && snap.loc != "authorized" && snap.loc != "unknown" {
-        lines.append(Ansi.fg256("⚠ SSIDs hidden — Location Services isn't active for wifiscan.", Pal.warn))
-        lines.append(Ansi.dim("  Enable 'wifiscan' in System Settings → Privacy & Security → Location Services, then rerun."))
+        lines.append(clipAnsi(Ansi.fg256("⚠ SSIDs hidden — Location Services isn't active for wifiscan.", Pal.warn), layout.cols))
+        lines.append(clipAnsi(Ansi.dim("  Enable 'wifiscan' in System Settings → Privacy & Security → Location Services, then rerun."), layout.cols))
     }
 
     // Body

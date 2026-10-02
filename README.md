@@ -448,7 +448,9 @@ Makefile.local                optional, git-ignored: machine-local SIGN identity
 
 No third‑party dependencies — just the system **CoreWLAN**, **CoreLocation** and
 **Foundation** frameworks. Builds in **Swift 6 language mode** (strict concurrency
-checking; Swift 6.0+ toolchain, i.e. Xcode 16 / CLT 16 or newer).
+checking; Swift 6.0+ toolchain, i.e. Xcode 16 / CLT 16 or newer). `swift build` reads
+`Package.swift` (tools-version 6.3), so it needs Swift 6.3+; `make` works with any Swift 6
+`swiftc`.
 
 ## Development
 

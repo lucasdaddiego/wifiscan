@@ -568,6 +568,10 @@ func charDisplayWidth(_ c: Character) -> Int {
     let s = c.unicodeScalars.first!
     let v = s.value
     if v == 0 { return 0 }
+    // An emoji-presentation selector (VS16) or keycap mark after the base promotes even
+    // a narrow or ASCII base to a 2-cell emoji: "❤️" is U+2764 + VS16, "1️⃣" is "1" +
+    // VS16 + U+20E3. Checked before the fast path, which would call "1️⃣" one cell.
+    if c.unicodeScalars.dropFirst().contains(where: { $0.value == 0xFE0F || $0.value == 0x20E3 }) { return 2 }
     // Fast path: everything below U+0300 (ASCII, Latin-1, Latin Extended) is one
     // cell — the first combining mark is U+0300 and the first wide range U+1100 —
     // so the bulk of real SSIDs skip the Unicode property lookup below entirely.
@@ -577,6 +581,9 @@ func charDisplayWidth(_ c: Character) -> Int {
     let cat = s.properties.generalCategory
     if cat == .nonspacingMark || cat == .enclosingMark { return 0 }
     if (0x200B...0x200F).contains(v) || v == 0xFEFF { return 0 }
+    // Emoji whose DEFAULT presentation is emoji (☕ ⚡ ✅ ⭐ …) carry no selector and sit
+    // outside wideRanges, but UAX #11 makes every Emoji_Presentation scalar Wide.
+    if s.properties.isEmojiPresentation { return 2 }
     for r in wideRanges where r.contains(v) { return 2 }
     return 1
 }

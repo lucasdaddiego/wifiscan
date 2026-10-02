@@ -482,6 +482,16 @@ func order(_ nets: [BSS]) -> String { nets.map { $0.ssid }.joined() }
         eq(charDisplayWidth("\u{05B0}"), 0, "Hebrew point (Mn) → 0")
         eq(charDisplayWidth("\u{20DD}"), 0, "enclosing circle (Me) → 0")
         eq(charDisplayWidth("\u{FE0F}"), 0, "variation selector → 0")
+        // Emoji glyphs the terminal paints 2 cells wide but the old table measured as 1,
+        // so an SSID like "☕ Cafe" pushed every column to its right one cell over.
+        eq(charDisplayWidth("\u{2615}"), 2, "☕ U+2615 (default emoji presentation) → 2")
+        eq(charDisplayWidth("\u{26A1}"), 2, "⚡ U+26A1 (default emoji presentation) → 2")
+        eq(charDisplayWidth("\u{2764}"), 1, "bare U+2764 (text presentation) → 1")
+        eq(charDisplayWidth("\u{2764}\u{FE0F}"), 2, "U+2764 + VS16 → 2")
+        eq(charDisplayWidth("\u{2764}\u{FE0E}"), 1, "U+2764 + VS15 (text) → 1")
+        eq(charDisplayWidth("1\u{FE0F}\u{20E3}"), 2, "keycap on an ASCII base → 2")
+        eq(charDisplayWidth("e\u{0301}"), 1, "ASCII base + combining mark stays 1")
+        eq(displayWidth("☕ Cafe"), 7, "emoji SSID measures what the terminal paints")
 
         eq(displayWidth("abc"), 3, "ascii width")
         eq(displayWidth("你好"), 4, "CJK width = 2 cells each")

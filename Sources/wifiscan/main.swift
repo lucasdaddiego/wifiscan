@@ -894,14 +894,12 @@ func draw(_ app: App) {
     lines.append(contentsOf: recLines.map { clipAnsi($0, layout.cols) })
     lines.append(contentsOf: footer.map { clipAnsi($0, layout.cols) })   // never wrap the layout
 
-    // Paint. Clear each line to EOL rather than wiping the whole screen every frame
-    // (that caused continuous flicker), and skip the write entirely when the frame
-    // is byte-identical to the last one (the loop runs ~10x/s but data rarely changes).
+    // Paint. Clear each line rather than wiping the whole screen every frame (that
+    // caused continuous flicker), and skip the write entirely when the frame is
+    // byte-identical to the last one (the loop runs ~10x/s but data rarely changes).
     let painted = Array(lines.prefix(layout.rows))
     let sizeChanged = (layout.cols != app.lastCols || layout.rows != app.lastRows)
-    var screen = sizeChanged ? "\u{1B}[2J\u{1B}[H" : "\u{1B}[H"
-    screen += painted.map { $0 + "\u{1B}[K" }.joined(separator: "\r\n")
-    screen += "\u{1B}[J"
+    let screen = frameBytes(painted, clear: sizeChanged)
 
     if screen == app.lastFrame && !sizeChanged { return }
     app.lastFrame = screen

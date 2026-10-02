@@ -610,6 +610,16 @@ func padLeft(_ s: String, _ n: Int) -> String {
     return String(repeating: " ", count: max(0, n - displayWidth(t))) + t
 }
 
+/// The bytes that paint one frame: clear + home when `clear` (the size changed), else
+/// just home, then every row with its old content erased FIRST. An erase-to-end (`ESC[K`
+/// or `ESC[J`) sent after a row exactly as wide as the terminal finds the cursor parked on
+/// the last column (pending wrap) and erases that cell — the newest Trend sample at 96–105
+/// columns, the end of every full-width rule. draw() pads `rows` to the full screen
+/// height, so nothing below the last row needs clearing.
+func frameBytes(_ rows: [String], clear: Bool) -> String {
+    (clear ? "\u{1B}[2J\u{1B}[H" : "\u{1B}[H") + rows.map { "\u{1B}[2K" + $0 }.joined(separator: "\r\n")
+}
+
 // MARK: - Terminal-safe SSID display
 //
 // SSIDs arrive from the radio as arbitrary bytes — a hostile access point can name

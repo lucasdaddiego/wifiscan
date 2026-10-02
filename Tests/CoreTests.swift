@@ -496,6 +496,13 @@ func order(_ nets: [BSS]) -> String { nets.map { $0.ssid }.joined() }
         eq(padLeft("hello", 3), "hel", "padLeft truncates over-long to width")
         eq(displayWidth(padLeft("你", 3)), 3, "padLeft wide char fills to width")
         eq(displayWidth(padLeft("你好", 3)), 3, "padLeft truncates wide without overflow")
+
+        // Frame bytes: erase each row BEFORE writing it, never after. A row as wide as
+        // the terminal parks the cursor on its last cell, and ESC[K / ESC[J there erase it.
+        eq(frameBytes(["ab", "c"], clear: false), "\u{1B}[H\u{1B}[2Kab\r\n\u{1B}[2Kc", "rows erased first, then written")
+        eq(frameBytes(["a"], clear: true), "\u{1B}[2J\u{1B}[H\u{1B}[2Ka", "size change clears the screen first")
+        ok(!frameBytes(["a", "b"], clear: false).contains("\u{1B}[K"), "no erase-to-end after a row")
+        ok(!frameBytes(["a", "b"], clear: false).hasSuffix("\u{1B}[J"), "no erase-below after the last row")
     }
 
     // MARK: Terminal-safe SSID display

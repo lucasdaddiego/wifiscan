@@ -553,9 +553,22 @@ private let leaveSequence = "\u{1B}[?1006l\u{1B}[?1000l\u{1B}[?25h\u{1B}[?1049l\
 nonisolated(unsafe) private var leaveBytes: UnsafeMutablePointer<UInt8>?
 nonisolated(unsafe) private var leaveByteCount = 0
 
+/// Write all of `s`. One write(2) can return short (a signal lands mid-write, a full
+/// pty) or fail with EINTR, and a single call then dropped the rest — e.g. the tail of
+/// the leave sequence, leaving the alt screen up and the cursor hidden. Retry until
+/// every byte is out; give up only on a real error or a zero-byte write.
 private func writeRaw(_ s: String) {
-    var bytes = Array(s.utf8)
-    _ = write(STDOUT_FILENO, &bytes, bytes.count)
+    let bytes = Array(s.utf8)
+    bytes.withUnsafeBufferPointer { buf in
+        guard let base = buf.baseAddress else { return }
+        var off = 0
+        while off < buf.count {
+            let n = write(STDOUT_FILENO, base + off, buf.count - off)
+            if n < 0 { if errno == EINTR { continue }; return }
+            if n == 0 { return }
+            off += n
+        }
+    }
 }
 
 /// Snapshot the leave sequence into a plain C buffer. MUST run before the signal
@@ -633,7 +646,14 @@ struct MouseEvent { let button: Int; let col: Int; let row: Int; let press: Bool
 /// One unit of input: a single-key command, a mouse report, or nothing this tick.
 enum Input { case key(Character), mouse(MouseEvent), none }
 
+/// One byte of lookahead: readInput peeks past an ESC to tell a lone Escape from a
+/// CSI/SS3 sequence, and when the next byte turns out to be an ordinary key (Esc then
+/// `q`, typed fast) it goes here so the key is delivered on the next read instead of
+/// being swallowed.
+nonisolated(unsafe) private var pushedBack: UInt8?   // main thread only (the input loop)
+
 private func readByte() -> UInt8? {
+    if let b = pushedBack { pushedBack = nil; return b }
     var b: UInt8 = 0
     return read(STDIN_FILENO, &b, 1) == 1 ? b : nil
 }
@@ -645,10 +665,14 @@ private func readInput() -> Input {
         return b < 0x80 ? .key(Character(UnicodeScalar(b))) : .none
     }
     // ESC: a lone Esc, an arrow/function key, or an SGR mouse report. Only CSI ("ESC [")
-    // carries mouse; anything else we drain and ignore. A lone Esc (nothing follows
+    // carries mouse; SS3 ("ESC O x") we drain and ignore. A lone Esc (nothing follows
     // within VTIME) is a real keypress — surface it so it can quit / close help.
     guard let b1 = readByte() else { return .key("\u{1B}") }
-    guard b1 == 0x5B /* [ */ else { _ = readByte(); return .none }  // e.g. SS3 (ESC O …)
+    if b1 == 0x4F /* O */ { _ = readByte(); return .none }   // SS3 (ESC O x): drain + ignore
+    // Neither CSI nor SS3: Esc, then a key typed fast enough to land in the same read
+    // window. Deliver both — the Esc now, the key on the next read — instead of dropping
+    // the key and the byte after it.
+    guard b1 == 0x5B /* [ */ else { pushedBack = b1; return .key("\u{1B}") }
     // Drain the CSI body up to its final byte (0x40–0x7E). Draining the WHOLE sequence
     // — not a fixed byte count — is what keeps a mouse report's digits from leaking out
     // as stray single-key commands. 32 bytes is well above any real sequence.

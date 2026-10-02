@@ -636,16 +636,21 @@ func frameBytes(_ rows: [String], clear: Bool) -> String {
 // (One-shot JSON output keeps the raw name: JSONEncoder escapes control bytes, so the
 // JSON stays valid and inert until a consumer chooses to render it.)
 
-/// Replace C0 control characters (incl. ESC, CR, LF, TAB), DEL, and C1 controls with a
-/// visible middle-dot placeholder. Width-preserving — one display cell per replaced
-/// scalar — so table columns stay aligned. Printable text (including the `‹hidden›`
-/// marker and CJK/emoji names) passes through untouched.
+/// Replace C0 control characters (incl. ESC, CR, LF, TAB), DEL, C1 controls, the
+/// line/paragraph separators and every Unicode format (Cf) scalar with a visible
+/// middle-dot placeholder. Cf covers the bidi overrides/isolates that reorder the rest
+/// of the row, and invisible scalars such as the word joiner (U+2060) that a terminal
+/// paints in 0 columns while charDisplayWidth counts 1, which shifted every column to
+/// the right of the SSID. Width-preserving — one display cell per replaced scalar — so
+/// table columns stay aligned. Printable text (including the `‹hidden›` marker and
+/// CJK/emoji names) passes through untouched.
 func sanitizeSSID(_ s: String) -> String {
     let placeholder: Unicode.Scalar = "\u{00B7}"      // · — unambiguously one cell wide
     var out = String.UnicodeScalarView()
     for scalar in s.unicodeScalars {
         let v = scalar.value
-        if v < 0x20 || v == 0x7F || (0x80...0x9F).contains(v) {
+        if v < 0x20 || v == 0x7F || (0x80...0x9F).contains(v)
+            || scalar.properties.generalCategory == .format || (0x2028...0x2029).contains(v) {
             out.append(placeholder)
         } else {
             out.append(scalar)

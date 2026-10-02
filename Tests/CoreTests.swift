@@ -528,6 +528,12 @@ func order(_ nets: [BSS]) -> String { nets.map { $0.ssid }.joined() }
         eq(sanitizeSSID("a\tb\nc\rd"), "a·b·c·d", "TAB / LF / CR neutralised")    // C0 < 0x20
         eq(sanitizeSSID("x\u{7F}y"), "x·y", "DEL (0x7F) neutralised")
         eq(sanitizeSSID("x\u{85}y"), "x·y", "C1 control (NEL, 0x85) neutralised")  // 0x80…0x9F
+        // Format (Cf) scalars: painted in 0 columns but counted as 1, or reordering the row.
+        eq(sanitizeSSID("Cafe\u{2060}"), "Cafe·", "word joiner (Cf) neutralised")
+        eq(sanitizeSSID("\u{202E}live"), "·live", "right-to-left override (Cf) neutralised")
+        eq(sanitizeSSID("a\u{2066}b\u{2069}"), "a·b·", "bidi isolates (Cf) neutralised")
+        eq(sanitizeSSID("a\u{2028}b\u{2029}"), "a·b·", "line / paragraph separators neutralised")
+        eq(displayWidth(sanitizeSSID("Cafe\u{2060}")), 5, "Cf placeholder is the one cell it is counted as")
         // Width preservation keeps table columns aligned regardless of escapes.
         eq(displayWidth(sanitizeSSID("a\u{1B}\u{7F}b")), 4, "sanitised name keeps display width")
     }

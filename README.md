@@ -109,13 +109,15 @@ so it works on the latest macOS with nothing to install.
 ```sh
 git clone https://github.com/lucasdaddiego/wifiscan.git
 cd wifiscan
-make            # build wifiscan.app into ~/Applications + a `wifiscan` launcher on ~/.bin
-make clean      # remove both
+make install    # build wifiscan.app into ~/Applications + a `wifiscan` launcher on ~/.bin
+make uninstall  # remove both
 ```
 
-`make` compiles an optimised, fully‑stripped binary (no debug info), embeds an
-`Info.plist`, ad‑hoc code‑signs it inside **`~/Applications/wifiscan.app`**, and
-symlinks a **`wifiscan`** command into **`~/.bin`**.
+`make install` compiles an optimised, fully‑stripped binary (no debug info), embeds an
+`Info.plist`, ad‑hoc code‑signs it as **`.build/wifiscan.app`**, and only then swaps it
+into **`~/Applications/wifiscan.app`** and symlinks a **`wifiscan`** command into
+**`~/.bin`** — a failed build leaves the previous install untouched. `make build` stops
+after the signed bundle under `.build/`; a bare `make` lists the targets.
 
 Make sure `~/.bin` is on your `PATH`:
 
@@ -142,7 +144,7 @@ network *names* are gated.
 
 ### Keep the grant across rebuilds (optional)
 
-Ad‑hoc signing gives the app a new identity on every `make`, so macOS forgets the
+Ad‑hoc signing gives the app a new identity on every `make install`, so macOS forgets the
 grant and you'd have to re‑enable it. To make the grant **stick across rebuilds**,
 sign with a stable self‑signed certificate:
 
@@ -154,10 +156,10 @@ sign with a stable self‑signed certificate:
    ```make
    SIGN := wifiscan-codesign
    ```
-3. `make` now signs with that identity. Grant Location once; every future build
+3. `make install` now signs with that identity. Grant Location once; every future build
    keeps it.
 
-(The public repo defaults to ad‑hoc signing, so `make` works for everyone with no
+(The public repo defaults to ad‑hoc signing, so `make install` works for everyone with no
 setup.)
 
 ## Usage
@@ -413,7 +415,7 @@ is in the commit history.
 | Symptom | Cause / fix |
 |---------|-------------|
 | All SSIDs show `‹hidden›` | Location Services not enabled for **wifiscan**. Enable it in System Settings → Privacy & Security → Location Services, then rerun. Check with `wifiscan --diag`. |
-| SSIDs were working, broke after `make` | Ad‑hoc identity changed on rebuild → grant lost. Re‑enable **wifiscan** in Location Services, or use a [stable signing cert](#keep-the-grant-across-rebuilds-optional). |
+| SSIDs were working, broke after `make install` | Ad‑hoc identity changed on rebuild → grant lost. Re‑enable **wifiscan** in Location Services, or use a [stable signing cert](#keep-the-grant-across-rebuilds-optional). |
 | `wifiscan --diag` shows `SSIDs visible: 0/N` | Same as above — permission. The metadata (power/channel) still works. |
 | First scan takes a few seconds | Expected — the first scan launches the persistent helper and settles Location once. Subsequent refreshes reuse it and are near‑instant. |
 | Double‑click prompts "wifiscan wants to control Terminal" (or iTerm) | One‑time macOS Automation prompt — click **OK**; it won't ask again. |
@@ -441,7 +443,7 @@ Tests/CoreTests.swift         dependency-free unit tests for Core (`make test`, 
 scripts/check-coverage.sh     coverage gate — fails unless Core.swift is 100% region+line covered
 .github/workflows/ci.yml      GitHub Actions: build + test + coverage gate on every push/PR
 Info.plist                    app-bundle metadata + Location-Services usage string
-Makefile                      `make` → signed wifiscan.app in ~/Applications + launcher; `make test` / `make coverage`
+Makefile                      `make install` → signed wifiscan.app in ~/Applications + launcher; `make build` / `test` / `coverage`
 Package.swift                 SwiftPM manifest (for editors/tooling; `make` uses swiftc)
 Makefile.local                optional, git-ignored: machine-local SIGN identity
 ```
@@ -455,11 +457,12 @@ checking; Swift 6.0+ toolchain, i.e. Xcode 16 / CLT 16 or newer). `swift build` 
 ## Development
 
 ```sh
-make                       # build + sign + install (≡ make install)
+make                       # list targets (default; ≡ make help)
+make build                 # build + sign .build/wifiscan.app, no install (quick compile)
+make install               # build, then swap the bundle into ~/Applications + the ~/.bin launcher
 make test                  # run the core unit tests (no Xcode/XCTest needed — CLT only)
 make coverage              # run tests under llvm-cov; fails unless Core.swift is 100% covered
-swiftc -swift-version 6 Sources/wifiscan/Core.swift Sources/wifiscan/main.swift \
-    -o /tmp/wifiscan -framework CoreWLAN -framework CoreLocation   # quick compile
+make clean                 # remove build artifacts (make uninstall removes the installed app)
 wifiscan --diag            # verify scanning + permission
 ```
 

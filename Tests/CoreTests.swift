@@ -3,7 +3,7 @@
 // with `make coverage`, or directly:
 //
 //   swiftc -parse-as-library Sources/wifiscan/Core.swift Tests/CoreTests.swift \
-//       -o /tmp/wifiscan-tests && /tmp/wifiscan-tests
+//       -o .build/wifiscan-tests && .build/wifiscan-tests
 //
 // Exit code is non-zero if any check fails. These tests are kept at 100% region
 // coverage of Core.swift (enforced by `make coverage` / CI); when you add code to

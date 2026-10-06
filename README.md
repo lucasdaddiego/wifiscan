@@ -83,7 +83,8 @@ third‑party packages.
 - **Modern‑terminal niceties** — flicker‑free **synchronized** frame updates, **mouse**
   (wheel‑scroll, click a header to sort) and a live **window/tab title**; all auto‑gated,
   so dumb terminals and pipes still work.
-- **Live auto‑refresh** with adjustable interval, plus on‑demand rescan.
+- **Live auto‑refresh** with adjustable interval (5–60 s — each scan takes the radio
+  off‑channel briefly, so the floor protects your own link), plus on‑demand rescan.
 - **Band filters** (2.4 / 5 / 6 GHz / all), scrolling and paging for crowded areas,
   a `?` help overlay, and view settings that **persist across runs**
   (`~/.config/wifiscan/config.json`).
@@ -225,8 +226,8 @@ gradient rather than five steps.
 | `a` | toggle **a**uto‑refresh | | `w` | sort by **w**idth |
 | `b` | cycle **b**and filter | | `e` | sort by s**e**curity |
 | `1` / `2` / `6` | filter to 2.4 / 5 / 6 GHz | | `l` | sort by **l**oad (QBSS airtime) |
-| `0` | show all bands | | `j` / `k` | scroll down / up |
-| `+` / `-` | refresh interval ± 1s | | `u` / `d` / `Space` | scroll 10 lines |
+| `0` | show all bands | | `j` / `k` · `↓` / `↑` | scroll down / up |
+| `+` / `-` | refresh interval ± 1 s (5–60 s) | | `u` / `d` · `PgUp` / `PgDn` · `Space` | scroll 10 lines |
 | | | | | press a sort key again to reverse |
 
 ### Mouse

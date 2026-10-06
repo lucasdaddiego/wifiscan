@@ -413,6 +413,10 @@ final class App: @unchecked Sendable {
     var showHelp = false
     var autoRefresh = true
     var interval: TimeInterval = 6
+    /// Auto-refresh bounds. Every CoreWLAN scan takes the radio off-channel for a second
+    /// or two, so at the old 2 s floor the user's own link stalled on every cycle.
+    static let minInterval: TimeInterval = 5
+    static let maxInterval: TimeInterval = 60
     var scroll = 0
     var quit = false
 
@@ -664,15 +668,14 @@ private func readInput() -> Input {
         // ASCII only — TUI commands are all single-byte; ignore multibyte UTF-8.
         return b < 0x80 ? .key(Character(UnicodeScalar(b))) : .none
     }
-    // ESC: a lone Esc, an arrow/function key, or an SGR mouse report. Only CSI ("ESC [")
-    // carries mouse; SS3 ("ESC O x") we drain and ignore. A lone Esc (nothing follows
-    // within VTIME) is a real keypress — surface it so it can quit / close help.
+    // ESC: a lone Esc, an arrow/paging key, or an SGR mouse report. A lone Esc (nothing
+    // follows within VTIME) is a real keypress — surface it so it can quit / close help.
     guard let b1 = readByte() else { return .key("\u{1B}") }
-    if b1 == 0x4F /* O */ { _ = readByte(); return .none }   // SS3 (ESC O x): drain + ignore
-    // Neither CSI nor SS3: Esc, then a key typed fast enough to land in the same read
-    // window. Deliver both — the Esc now, the key on the next read — instead of dropping
-    // the key and the byte after it.
-    guard b1 == 0x5B /* [ */ else { pushedBack = b1; return .key("\u{1B}") }
+    // CSI ("ESC [ …") or SS3 ("ESC O …"): arrows arrive as the latter in application-cursor
+    // mode (tmux and some terminals), with the same final byte. Anything else is Esc, then
+    // a key typed fast enough to land in the same read window: deliver both — the Esc now,
+    // the key on the next read — instead of dropping the key and the byte after it.
+    guard b1 == 0x5B /* [ */ || b1 == 0x4F /* O */ else { pushedBack = b1; return .key("\u{1B}") }
     // Drain the CSI body up to its final byte (0x40–0x7E). Draining the WHOLE sequence
     // — not a fixed byte count — is what keeps a mouse report's digits from leaking out
     // as stray single-key commands. 32 bytes is well above any real sequence.
@@ -690,8 +693,18 @@ private func readInput() -> Input {
         if nums.count == 3 {
             return .mouse(MouseEvent(button: nums[0], col: nums[1], row: nums[2], press: final == 0x4D))
         }
+        return .none
     }
-    return .none
+    // Arrow and paging keys act as their letter twins. The TUI has no text field, so a
+    // synthesised key can never land in one; these used to be drained and dropped, so ↓
+    // did nothing.
+    switch body {
+    case [0x41]:       return .key("k")   // ↑
+    case [0x42]:       return .key("j")   // ↓
+    case [0x35, 0x7E]: return .key("u")   // PgUp  (ESC [ 5 ~)
+    case [0x36, 0x7E]: return .key("d")   // PgDn  (ESC [ 6 ~)
+    default:           return .none
+    }
 }
 
 // MARK: - Interactive loop
@@ -777,8 +790,8 @@ func handleKey(_ k: Character, app: App) {
     case "k": app.scroll = max(0, app.scroll - 1)
     case "d", " ": app.scroll += 10
     case "u": app.scroll = max(0, app.scroll - 10)
-    case "+", "=": app.interval = min(60, app.interval + 1)
-    case "-", "_": app.interval = max(2, app.interval - 1)
+    case "+", "=": app.interval = min(App.maxInterval, app.interval + 1)
+    case "-", "_": app.interval = max(App.minInterval, app.interval - 1)
     default: break
     }
     app.markDirty()   // any key may have changed view state → redraw next loop
@@ -959,8 +972,9 @@ private func helpOverlayLines() -> [String] {
         ("p s c n w e l", "sort: power · SNR · channel · name · width · security · load"),
         ("(same key again)", "reverse the sort direction"),
         ("b · 1 2 6 0", "cycle band · filter 2.4 / 5 / 6 / all"),
-        ("j k · u d · Space", "scroll: line · 10 lines · 10 lines down"),
-        ("+ / -", "auto-refresh interval"),
+        ("j k · ↓ ↑", "scroll one line"),
+        ("u d · PgUp PgDn · Space", "scroll 10 lines (Space: down)"),
+        ("+ / -", "auto-refresh interval (5–60 s)"),
         ("mouse", "wheel scrolls · click a column header to sort"),
     ]
     var out = [Ansi.bold(Ansi.fg256("Keys", Pal.heading)), ""]
@@ -1087,7 +1101,7 @@ func loadPrefs(into app: App) {
           let p = try? JSONDecoder().decode(Prefs.self, from: data) else { return }
     if let s = p.sort, let k = sortNames[s] { app.sortKey = k }
     if let a = p.ascending { app.ascending = a }
-    if let i = p.interval { app.interval = min(60, max(2, i)) }
+    if let i = p.interval { app.interval = min(App.maxInterval, max(App.minInterval, i)) }
     if let a = p.autoRefresh { app.autoRefresh = a }
 }
 
@@ -1566,7 +1580,7 @@ func printHelp() {
     TUI KEYS:
       q / Esc / Ctrl-C quit · ? help · r rescan · g / Tab channel-map · a auto-refresh
       p/s/c/n/w/e/l sort (press again to reverse) · b cycle band
-      1/2/6 filter band · 0 all bands · j/k u/d scroll · +/- refresh interval
+      1/2/6 filter band · 0 all bands · j/k (↑/↓) u/d (PgUp/PgDn) scroll · +/- refresh interval (5–60 s)
       mouse: wheel scrolls · click a column header to sort
 
     FILES:

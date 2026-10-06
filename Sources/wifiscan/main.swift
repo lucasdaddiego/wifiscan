@@ -1003,9 +1003,21 @@ func runDiag(app: App) {
 
 // MARK: - One-shot (non-interactive) mode
 
+/// `--once` / `--json` exit 3 (with a line on stderr) when the scan helper failed — not
+/// running from a .app, the helper timing out, no Wi-Fi interface. An empty result from a
+/// failed scan used to print `[]` and exit 0, so a cron job with a plain `swift build`
+/// binary logged empty arrays nightly and nobody noticed. Exit 3 is blescan's "no scan
+/// performed" status, so one check covers both tools.
 func runOnce(app: App, json: Bool) {
     let result = HelperClient.shared.scan()
     HelperClient.shared.shutdown()   // one-shot mode: don't leave a daemon behind
+    // Runs after the output below (deferred), so a script still gets the table / array.
+    defer {
+        if let e = result.error {
+            FileHandle.standardError.write(Data("wifiscan: no scan performed — \(e)\n".utf8))
+            exit(3)
+        }
+    }
     let conn = app.scanner.currentSSID ?? result.conn
     if result.error == nil, let path = app.logPath {
         appendSurveyLog(path, nets: result.nets, conn: conn)   // log the FULL scan, pre-filter
@@ -1026,7 +1038,6 @@ func runOnce(app: App, json: Bool) {
         let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted, .sortedKeys]
         if let d = try? enc.encode(arr), let s = String(data: d, encoding: .utf8) { print(s) }
         else { print("[]") }
-        if let e = result.error { FileHandle.standardError.write(Data("scan error: \(e)\n".utf8)) }
         return
     }
     print(Ansi.bold("wifiscan — \(nets.count) networks  (iface \(app.scanner.interfaceName), connected \(conn.map(sanitizeSSID) ?? "—"))"))
@@ -1435,15 +1446,18 @@ final class ScanDaemon: NSObject, CLLocationManagerDelegate {
     }
 }
 
-/// Best-effort sweep of temp files / daemon control dirs leaked by helpers that
-/// crashed before cleanup. Live daemon dirs are kept fresh by the heartbeat, so
-/// only genuinely stale (>5 min untouched) `wifiscan-*` items are removed.
+/// Best-effort sweep of daemon control dirs leaked by helpers that crashed before
+/// cleanup. Live daemon dirs are kept fresh by the heartbeat, so only genuinely stale
+/// (>5 min untouched) ones are removed — and only entries of the exact shape startHelper
+/// creates (isDaemonControlDir). A plain `wifiscan-*` prefix match used to delete the
+/// user's own `$TMPDIR/wifiscan-survey.jsonl` --log file on the next launch after 5 min.
 private func sweepStaleTempFiles() {
     let dir = NSTemporaryDirectory()
     guard let items = try? FileManager.default.contentsOfDirectory(atPath: dir) else { return }
     let cutoff = Date().addingTimeInterval(-300)
-    for name in items where name.hasPrefix("wifiscan-") {
+    for name in items {
         let path = dir + name
+        guard isDaemonControlDir(path, tempRoot: dir) else { continue }
         if let attrs = try? FileManager.default.attributesOfItem(atPath: path),
            let m = attrs[.modificationDate] as? Date, m < cutoff {
             try? FileManager.default.removeItem(atPath: path)
@@ -1542,6 +1556,10 @@ func printHelp() {
       --exclude-ssid a[,b]       keep your own network(s) out of the recommendations
                                  (the connected SSID is always excluded)
       --log <file>               append every scan to a JSONL survey log
+
+    --once and --json exit 3 (with a line on stderr) when the scan helper failed — not
+    running from the .app bundle, no Wi-Fi interface, helper timeout — so an empty result
+    is distinguishable from a scan that never happened. Usage errors exit 2.
 
     Colour is automatic: on in a terminal, off when piped/redirected (or set NO_COLOR).
 

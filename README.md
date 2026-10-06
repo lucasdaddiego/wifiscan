@@ -176,8 +176,8 @@ wifiscan --help                     # usage summary
 
 | Flag | Description |
 |------|-------------|
-| `--once` | Single scan; print the table, channel map and recommendations, then exit. |
-| `--json` | Single scan; emit a JSON array on stdout. |
+| `--once` | Single scan; print the table, channel map and recommendations, then exit (exit 3 if the scan helper failed). |
+| `--json` | Single scan; emit a JSON array on stdout (exit 3 if the scan helper failed). |
 | `--diag` | Print interface, permission status, network/SSID counts and the app bundle path. |
 | `--band 2.4\|5\|6\|all` | Filter to one band (initial TUI filter, or the one‑shot output). |
 | `--sort key` | Initial sort: `power`, `snr`, `channel`, `name`, `band`, `width`, `security`, `load`. |
@@ -323,7 +323,10 @@ the live modes do), so the file is also easy to post‑process with `jq`.
 `wifiscan --json` prints a pretty array, sorted by signal power (strongest first);
 object keys are alphabetised. `noise` and `snr` are present only when macOS actually
 measured them, and `utilization` (QBSS airtime, 0…1) only when the AP broadcasts it
-(otherwise omitted):
+(otherwise omitted). If the scan helper failed (not running from the `.app` bundle, no
+Wi‑Fi interface, helper timeout) the array is still printed, but a one‑line reason goes to
+stderr and the exit status is **3** — so a script never mistakes "the scan never ran" for
+"no networks in range":
 
 ```jsonc
 [

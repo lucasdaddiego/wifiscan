@@ -18,15 +18,26 @@ jobs:
     name: build · test · 100% coverage
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v7
+      # Pinned to a commit, not a tag: a moved tag would run foreign code here. Dependabot
+      # (.github/dependabot.yml) keeps the SHA current.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Swift toolchain
         run: swift --version
 
       # Compiles the whole app — Core.swift plus main.swift and its CoreWLAN /
       # CoreLocation links — so a break in the framework-facing code fails CI too.
-      - name: Build
+      - name: Build (SwiftPM, debug)
         run: swift build
+
+      # The shipped bundle is NOT the SwiftPM one: `make build` is the release path — -O,
+      # symbol strip, -dead_strip, the Info.plist copied into the bundle, then an ad-hoc
+      # codesign of the whole .app. Until this ran here, a linker-flag or plist regression
+      # only surfaced on a developer's `make install`.
+      - name: Build (release bundle, Makefile)
+        run: make build
 
       # Fast, uninstrumented run of the dependency-free core unit tests.
       - name: Unit tests

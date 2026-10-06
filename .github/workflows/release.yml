@@ -1,0 +1,69 @@
+name: Release
+
+# Publishing = pushing a `v*` tag (`make release` does that from Info.plist's version).
+# Builds the universal bundle with the same Makefile path `make install` uses, checks the
+# tag against the plist and the app's own --version, and attaches the zip plus its
+# SHA256SUMS to a GitHub release with generated notes.
+#
+# A manual run (workflow_dispatch) is a dry run: the same build and smoke test on the
+# runner — which, unlike a Command Line Tools-only Mac, can link the x86_64 slice — with
+# the publish step skipped. Use it to prove the pipeline before tagging.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+# No default grants: only the release job gets what `gh release create` needs.
+permissions: {}
+
+jobs:
+  release:
+    name: build universal · publish
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    steps:
+      # Pinned to a commit, not a tag: this job can write to the repo's releases, so a
+      # moved tag must never be able to run foreign code here. Dependabot keeps it current.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Swift toolchain
+        run: swift --version
+
+      - name: Version from Info.plist (must match the tag)
+        run: |
+          v="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Info.plist)"
+          echo "VERSION=$v" >> "$GITHUB_ENV"
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            [ "v$v" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME but Info.plist says $v"; exit 1; }
+          else
+            echo "dry run on $GITHUB_REF_NAME: building v$v, not publishing"
+          fi
+
+      - name: Unit tests
+        run: make test
+
+      - name: Build universal bundle + zip + SHA256SUMS
+        run: make dist
+
+      - name: Smoke-test the artifact
+        run: |
+          lipo -info .build/dist/wifiscan.app/Contents/MacOS/wifiscan
+          codesign -dv .build/dist/wifiscan.app
+          out="$(.build/dist/wifiscan.app/Contents/MacOS/wifiscan --version)"
+          [ "$out" = "wifiscan $VERSION" ] || { echo "--version printed '$out'"; exit 1; }
+          (cd .build/dist && shasum -a 256 -c SHA256SUMS)
+          unzip -l .build/dist/*.zip
+
+      - name: Publish the GitHub release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" .build/dist/*.zip .build/dist/SHA256SUMS \
+            --title "wifiscan $GITHUB_REF_NAME" \
+            --notes-file .github/release-notes.md \
+            --generate-notes

@@ -56,6 +56,11 @@ FRAMEWORKS  := -framework CoreWLAN -framework CoreLocation
 # Release: optimise (-O), strip local symbols (-x), drop dead code (-dead_strip).
 # No -g, so zero debug info. Stripping is at link time, before signing.
 RELEASE     := -O -Xlinker -x -Xlinker -dead_strip
+# Slices in the universal dist bundle. The x86_64 slice needs a toolchain whose Swift
+# compatibility libraries carry both architectures — Xcode's does, and that is what the
+# release workflow runs on. The Command Line Tools ship them arm64-only, so on a CLT-only
+# Mac build a single-slice dist with `make dist ARCHS=arm64`.
+ARCHS       ?= arm64 x86_64
 
 LSREGISTER  := /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 
@@ -111,15 +116,17 @@ coverage: ## Run the core tests under coverage; fail unless Core.swift is 100% c
 	@xcrun llvm-cov report "$(COV_DIR)/tests" -instr-profile="$(COV_DIR)/tests.profdata" $(CORE)
 	@bash scripts/check-coverage.sh "$(COV_DIR)/tests" "$(COV_DIR)/tests.profdata" $(CORE)
 
-# Universal bundle: the two slices are cross-compiled with -target (the macOS SDK carries
-# both), lipo'd together into a fresh .app, signed once, then zipped with LICENSE + README
-# and a SHA-256 manifest. Run by the release workflow on every v* tag.
+# Universal bundle: each slice is cross-compiled with -target (the macOS SDK carries both),
+# the slices are lipo'd together into a fresh .app, signed once, then zipped with LICENSE +
+# README and a SHA-256 manifest. Run by the release workflow on every v* tag.
 dist: ## Build a universal (arm64 + x86_64) signed wifiscan.app, zip it + write SHA256SUMS
 	@rm -rf "$(DIST_DIR)"
 	@mkdir -p "$(DIST_APP)/Contents/MacOS"
-	$(SWIFTC) $(SWIFTFLAGS) $(RELEASE) -target arm64-apple-macosx12.0 $(SRC) -o "$(DIST_DIR)/$(BINARY)-arm64" $(FRAMEWORKS)
-	$(SWIFTC) $(SWIFTFLAGS) $(RELEASE) -target x86_64-apple-macosx12.0 $(SRC) -o "$(DIST_DIR)/$(BINARY)-x86_64" $(FRAMEWORKS)
-	lipo -create "$(DIST_DIR)/$(BINARY)-arm64" "$(DIST_DIR)/$(BINARY)-x86_64" -output "$(DIST_APP)/Contents/MacOS/$(BINARY)"
+	@for arch in $(ARCHS); do \
+	  echo "$(SWIFTC) $(SWIFTFLAGS) $(RELEASE) -target $$arch-apple-macosx12.0 $(SRC) -o \"$(DIST_DIR)/$(BINARY)-$$arch\" $(FRAMEWORKS)"; \
+	  $(SWIFTC) $(SWIFTFLAGS) $(RELEASE) -target $$arch-apple-macosx12.0 $(SRC) -o "$(DIST_DIR)/$(BINARY)-$$arch" $(FRAMEWORKS) || exit 1; \
+	done
+	lipo -create $(foreach a,$(ARCHS),"$(DIST_DIR)/$(BINARY)-$(a)") -output "$(DIST_APP)/Contents/MacOS/$(BINARY)"
 	cp $(PLIST) "$(DIST_APP)/Contents/Info.plist"
 	codesign --force --sign $(SIGN) --identifier $(BUNDLE_ID) "$(DIST_APP)"
 	cp LICENSE README.md "$(DIST_DIR)/"

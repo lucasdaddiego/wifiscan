@@ -120,6 +120,14 @@ into **`~/Applications/wifiscan.app`** and symlinks a **`wifiscan`** command int
 **`~/.bin`** — a failed build leaves the previous install untouched. `make build` stops
 after the signed bundle under `.build/`; a bare `make` lists the targets.
 
+Or grab the universal (Apple Silicon + Intel) `wifiscan.app` zip from the
+[latest release](https://github.com/lucasdaddiego/wifiscan/releases/latest): check it
+against the published `SHA256SUMS`, `xattr -dr com.apple.quarantine wifiscan.app` (it's
+ad‑hoc signed, so Gatekeeper quarantines the download), move it to `~/Applications` and
+symlink `Contents/MacOS/wifiscan` onto your `PATH`. Building from source skips the
+quarantine step and, with a personal certificate, keeps the Location grant across upgrades
+(below).
+
 Make sure `~/.bin` is on your `PATH`:
 
 ```sh
@@ -172,6 +180,7 @@ wifiscan --json                     # one scan as JSON on stdout (pipe into jq, 
 wifiscan --diag                     # scan + permission diagnostics
 wifiscan --log ~/wifi-survey.jsonl  # TUI as usual, but append every scan to a survey log
 wifiscan --report ~/wifi-survey.jsonl   # aggregate that log: cleanest channel by hour
+wifiscan --version                  # print the version
 wifiscan --help                     # usage summary
 ```
 
@@ -179,12 +188,13 @@ wifiscan --help                     # usage summary
 |------|-------------|
 | `--once` | Single scan; print the table, channel map and recommendations, then exit (exit 3 if the scan helper failed). |
 | `--json` | Single scan; emit a JSON array on stdout (exit 3 if the scan helper failed). |
-| `--diag` | Print interface, permission status, network/SSID counts and the app bundle path. |
+| `--diag` | Print version, interface, permission status, network/SSID counts and the app bundle path. |
 | `--band 2.4\|5\|6\|all` | Filter to one band (initial TUI filter, or the one‑shot output). |
 | `--sort key` | Initial sort: `power`, `snr`, `channel`, `name`, `band`, `width`, `security`, `load`. |
 | `--exclude-ssid a[,b]` | Keep your own network(s) out of the recommendation model. The connected SSID is always excluded. |
 | `--log file` | Append every completed scan to `file` as JSONL (works in TUI and one‑shot modes). |
 | `--report file` | Read a `--log` file and print the cleanest channel per hour of day + an all‑day pick, per band. |
+| `--version`, `-V` | Print the version. |
 | `--help`, `-h` | Show usage. |
 
 Everything else is a **live** TUI control. Sort column, band filter and refresh
@@ -447,8 +457,9 @@ Sources/wifiscan/Core.swift   pure logic — channel plan · bonding · congesti
 Sources/wifiscan/main.swift   CoreWLAN/CoreLocation · TUI · out-of-process scan helper · entrypoint
 Tests/CoreTests.swift         dependency-free unit tests for Core (`make test`, 100% covered)
 scripts/check-coverage.sh     coverage gate — fails unless Core.swift is 100% region+line covered
-.github/workflows/ci.yml      GitHub Actions: build + test + coverage gate on every push/PR
-Info.plist                    app-bundle metadata + Location-Services usage string
+.github/workflows/ci.yml      GitHub Actions: debug + release build, tests, coverage gate on every push/PR
+.github/workflows/release.yml GitHub Actions: on a v* tag, `make dist` → universal .app zip + SHA256SUMS → GitHub release
+Info.plist                    app-bundle metadata + version + Location-Services usage string
 Makefile                      `make install` → signed wifiscan.app in ~/Applications + launcher; `make build` / `test` / `coverage`
 Package.swift                 SwiftPM manifest (for editors/tooling; `make` uses swiftc)
 Makefile.local                optional, git-ignored: machine-local SIGN identity
@@ -468,9 +479,19 @@ make build                 # build + sign .build/wifiscan.app, no install (quick
 make install               # build, then swap the bundle into ~/Applications + the ~/.bin launcher
 make test                  # run the core unit tests (no Xcode/XCTest needed — CLT only)
 make coverage              # run tests under llvm-cov; fails unless Core.swift is 100% covered
+make dist                  # universal (arm64 + x86_64) signed wifiscan.app + zip + SHA256SUMS in .build/dist
+make release               # tag v<Info.plist version> and push it; CI builds + publishes the release
 make clean                 # remove build artifacts (make uninstall removes the installed app)
 wifiscan --diag            # verify scanning + permission
 ```
+
+**Releasing:** bump `CFBundleShortVersionString` in `Info.plist`, commit, push, `make release`
+(it refuses a HEAD that isn't on `origin/master`). The tag triggers `release.yml`, which
+checks the tag against the plist and the app's own `--version`, runs the tests, builds the
+universal zip and publishes it with its `SHA256SUMS` and generated notes. A manual run of
+the workflow (`gh workflow run release.yml`) is a dry run: same build and smoke test, no
+publish. The x86_64 slice needs Xcode's toolchain (the CI runner has it); a Command Line
+Tools-only Mac can still build a single-slice bundle with `make dist ARCHS=arm64`.
 
 Two files: **`Core.swift`** holds the pure, framework‑free logic (channel plan,
 bonding model, congestion scoring, sorting, text layout, and terminal‑escape

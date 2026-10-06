@@ -994,6 +994,7 @@ func runDiag(app: App) {
     defer { HelperClient.shared.shutdown() }
     let named = res.nets.filter { !$0.hidden }.count
     print("wifiscan diagnostics")
+    print("  version            : \(wifiscanVersion)")
     print("  interface          : \(s.interfaceName)")
     print("  power on           : \(s.powerOn)")
     print("  connected ssid     : \(s.currentSSID.map(sanitizeSSID) ?? "—")")
@@ -1552,6 +1553,16 @@ private func relaunchViaAppleScript(exe: String) {
 
 // MARK: - Entry
 
+/// CFBundleShortVersionString from the bundle's Info.plist, resolved through the real
+/// executable path (appBundlePath) rather than Bundle.main — invoked via the ~/.bin
+/// symlink, Bundle.main reports the symlink's directory. A bare `swift build` binary has
+/// no bundle, hence "dev". `make release` tags from the same plist value.
+let wifiscanVersion: String = {
+    let bundle = appBundlePath()
+    guard bundle.hasSuffix(".app") else { return "dev" }
+    return Bundle(path: bundle)?.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev"
+}()
+
 func printHelp() {
     print("""
     wifiscan — WiFi survey & channel planner (macOS, CoreWLAN)
@@ -1562,6 +1573,7 @@ func printHelp() {
       wifiscan --json            one scan as JSON on stdout
       wifiscan --diag            print scan/permission diagnostics
       wifiscan --report <file>   aggregate a --log survey: cleanest channel by hour
+      wifiscan --version         print the version  (also -V)
       wifiscan --help            show this help  (also -h)
 
     OPTIONS:
@@ -1596,9 +1608,12 @@ func die(_ msg: String) -> Never {
 
 func main() {
     let args = Array(CommandLine.arguments.dropFirst())
-    let app = App()
 
+    // Answered before the App (and its CoreWLAN client) exists: these need no radio.
     if args.contains("--help") || args.contains("-h") { printHelp(); return }
+    if args.contains("--version") || args.contains("-V") { print("wifiscan \(wifiscanVersion)"); return }
+
+    let app = App()
 
     // Internal helper mode — reached only when relaunched via `open`, never typed.
     // The daemon REMOVES this dir when the front-end stops heart-beating, so accept

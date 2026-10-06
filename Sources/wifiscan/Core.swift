@@ -29,14 +29,17 @@ struct BSS: Codable {
     var linearPower: Double { pow(10.0, Double(rssi) / 10.0) }
 
     /// Inclusive [low, high] frequency span (MHz) actually occupied, accounting
-    /// for channel bonding.
+    /// for channel bonding. For a bonded 2.4 GHz AP this is the envelope of both
+    /// possible secondary placements (see `energySpans`), not one 40 MHz block.
     var freqSpan: (lo: Double, hi: Double) {
         let w = widthMHz > 0 ? widthMHz : 20
         switch band {
         case .ghz24:
-            // 2.4 GHz bonding is rare/discouraged; approximate around control freq.
+            // HT40 is the 20 MHz control channel plus a 20 MHz secondary above OR below
+            // it, never a block centred on the control frequency: ±(w − 10) covers both.
             let fc = Band.centerFreq(.ghz24, channel)
-            return (fc - Double(w) / 2.0, fc + Double(w) / 2.0)
+            if w <= 20 { return (fc - 10, fc + 10) }
+            return (fc + 10 - Double(w), fc - 10 + Double(w))
         case .ghz5, .ghz6, .unknown:
             // coveredChannels always yields at least the control channel, so fold the
             // covered 20 MHz slots into the frequency span they occupy; ±10 MHz widens
@@ -46,6 +49,23 @@ struct BSS: Codable {
                 .map { Band.centerFreq(band, $0) }
             return (freqs.min()! - 10.0, freqs.max()! + 10.0)
         }
+    }
+
+    /// Where this AP's power lands, as (lo, hi, share) segments whose shares sum to 1 —
+    /// the congestion model spreads each segment's share evenly over its width (PSD).
+    /// One segment for everything except a bonded 2.4 GHz AP. HT40 there is the control
+    /// channel ±10 MHz plus a 20 MHz secondary ABOVE it (HT40+) or BELOW it (HT40−), and
+    /// CoreWLAN hides which. A single block centred on the control frequency put an HT40+
+    /// AP on ch 1 (really 2402–2442 MHz) at 2392–2432, so the ch 6 slot saw 5 MHz of
+    /// overlap instead of 15 and was recommended as clean. With the placement unknown,
+    /// both are modelled at half the AP's power: [fc−10, fc+30] and [fc−30, fc+10]. The
+    /// control slot still collects what both placements put there; a slot that only one
+    /// placement can reach gets the expected half.
+    var energySpans: [(lo: Double, hi: Double, share: Double)] {
+        let w = widthMHz > 0 ? widthMHz : 20
+        guard band == .ghz24, w > 20 else { let s = freqSpan; return [(s.lo, s.hi, 1.0)] }
+        let fc = Band.centerFreq(.ghz24, channel)
+        return [(fc - 10, fc - 10 + Double(w), 0.5), (fc + 10 - Double(w), fc + 10, 0.5)]
     }
 }
 
@@ -91,16 +111,19 @@ enum Band: Int, Codable {
 // MARK: - Channel plan (bonding → covered 20 MHz control channels)
 
 enum ChannelPlan {
-    // Standard 5 GHz bonded groups (control channels). Irregular due to UNII gaps.
+    // Standard 5 GHz bonded groups (control channels). Irregular due to UNII gaps. The
+    // UNII-3/4 tail (165–177) bonds too — an 80 MHz AP on 165 was scored as 20 MHz.
     static let g5_40: [[Int]] = [
         [36,40],[44,48],[52,56],[60,64],
         [100,104],[108,112],[116,120],[124,128],
-        [132,136],[140,144],[149,153],[157,161]
+        [132,136],[140,144],[149,153],[157,161],
+        [165,169],[173,177]
     ]
     static let g5_80: [[Int]] = [
         [36,40,44,48],[52,56,60,64],
         [100,104,108,112],[116,120,124,128],
-        [132,136,140,144],[149,153,157,161]
+        [132,136,140,144],[149,153,157,161],
+        [165,169,173,177]
     ]
     static let g5_160: [[Int]] = [
         [36,40,44,48,52,56,60,64],
@@ -171,24 +194,27 @@ enum Analysis {
     static func loads(_ nets: [BSS], band: Band, candidates: [Int],
                       excluding: Set<String> = []) -> [ChannelLoad] {
         // Per-AP figures are independent of the candidate, so derive them once here
-        // rather than once per (candidate × AP) pair: freqSpan walks the bonding
+        // rather than once per (candidate × AP) pair: energySpans walks the bonding
         // tables and linearPower is a pow(), and this runs on every TUI frame.
-        let aps: [(lo: Double, hi: Double, energy: Double, rssi: Int)] = nets.compactMap { ap in
+        let aps: [(spans: [(lo: Double, hi: Double, share: Double)], energy: Double, rssi: Int)] = nets.compactMap { ap in
             guard ap.band == band, !excluding.contains(ap.ssid) else { return nil }
-            let s = ap.freqSpan
             let airtime = ap.utilization.map { max(0.1, $0) } ?? 1.0
-            return (s.lo, s.hi, ap.linearPower * airtime, ap.rssi)
+            return (ap.energySpans, ap.linearPower * airtime, ap.rssi)
         }
         return candidates.map { cand in
             let fc = Band.centerFreq(band, cand)
-            let span = (lo: fc - 10.0, hi: fc + 10.0)
+            let slot = (lo: fc - 10.0, hi: fc + 10.0)
             var load = ChannelLoad(channel: cand)
             for ap in aps {
-                let overlap = min(ap.hi, span.hi) - max(ap.lo, span.lo)
-                guard overlap > 0 else { continue }
-                let widthFrac = overlap / (ap.hi - ap.lo)   // slice of the AP's PSD in this slot
+                // The slice of the AP's PSD that lands in this slot, summed over its spans.
+                var frac = 0.0
+                for s in ap.spans {
+                    let overlap = min(s.hi, slot.hi) - max(s.lo, slot.lo)
+                    if overlap > 0 { frac += s.share * overlap / (s.hi - s.lo) }
+                }
+                guard frac > 0 else { continue }
                 load.apCount += 1
-                load.weighted += ap.energy * widthFrac
+                load.weighted += ap.energy * frac
                 load.strongest = max(load.strongest, ap.rssi)
             }
             return load

@@ -264,8 +264,10 @@ subject to radar detection.
 ## How recommendations work
 
 1. Each AP is mapped to the **frequency span** it actually occupies, accounting for
-   20 / 40 / 80 / 160 / 320 MHz channel bonding — standard 5 GHz bonded groups, the
-   regular 6 GHz grid, and centre‑frequency overlap for 2.4 GHz.
+   20 / 40 / 80 / 160 / 320 MHz channel bonding — standard 5 GHz bonded groups (36–177),
+   the regular 6 GHz grid, and for a 40 MHz 2.4 GHz AP (HT40) the control channel plus
+   a 20 MHz secondary **above or below** it. CoreWLAN doesn't say which side, so both
+   placements count at half weight: an HT40 AP on ch 1 lands real energy on ch 6.
 2. For each candidate channel, `wifiscan` sums the **linear power** (`10^(RSSI/10)`)
    of every overlapping AP, scaled by the **fraction of its spectrum that actually
    lands on the candidate** (an 80 MHz AP spreads its energy, so a 20 MHz slot

@@ -78,14 +78,28 @@ func order(_ nets: [BSS]) -> String { nets.map { $0.ssid }.joined() }
         ok(s80.lo == 5170 && s80.hi == 5250, "freqSpan 5G ch36 80MHz = (5170,5250)")
         let s24 = mk("x", -50, 6, .ghz24, 20).freqSpan
         ok(s24.lo == 2427 && s24.hi == 2447, "freqSpan 2.4 ch6 20MHz = (2427,2447)")
-        let s24b = mk("x", -50, 6, .ghz24, 40).freqSpan   // 2.4 approximates ±w/2 around control
-        ok(s24b.lo == 2417 && s24b.hi == 2457, "freqSpan 2.4 ch6 40MHz approximates ±20")
+        // HT40 is control ±10 plus a 20 MHz secondary above OR below: the envelope of both
+        // placements is ±30, not a 40 MHz block centred on the control frequency.
+        let s24b = mk("x", -50, 6, .ghz24, 40).freqSpan
+        ok(s24b.lo == 2407 && s24b.hi == 2467, "freqSpan 2.4 ch6 40MHz = envelope of HT40+ and HT40− (2407,2467)")
         let s6 = mk("x", -50, 1, .ghz6, 80).freqSpan       // covers 6G ch [1,5,9,13]
         ok(s6.lo == 5945 && s6.hi == 6025, "freqSpan 6G ch1 80MHz = (5945,6025)")
+        let s165 = mk("x", -50, 165, .ghz5, 80).freqSpan   // UNII-3/4 group [165,169,173,177]
+        ok(s165.lo == 5815 && s165.hi == 5895, "freqSpan 5G ch165 80MHz = (5815,5895)")
         let s0 = mk("x", -50, 36, .ghz5, 0).freqSpan        // width 0 (unknown) → treated as 20
         ok(s0.lo == 5170 && s0.hi == 5190, "freqSpan unknown width treated as 20 MHz")
         let su = mk("x", -50, 0, .unknown, 20).freqSpan      // unknown band folds around centerFreq 0
         ok(su.lo == -10 && su.hi == 10, "freqSpan unknown band folds around 0")
+
+        // energySpans: one full-share segment everywhere except a bonded 2.4 GHz AP, which
+        // gets both HT40 placements at half weight (CoreWLAN hides the secondary offset).
+        func spans(_ b: BSS) -> [[Double]] { b.energySpans.map { [$0.lo, $0.hi, $0.share] } }
+        eq(spans(mk("x", -50, 36, .ghz5, 80)), [[5170, 5250, 1]], "5 GHz 80MHz → one segment, share 1")
+        eq(spans(mk("x", -50, 6, .ghz24, 20)), [[2427, 2447, 1]], "2.4 GHz 20MHz → one segment, share 1")
+        eq(spans(mk("x", -50, 6, .ghz24, 0)), [[2427, 2447, 1]], "2.4 GHz unknown width → 20 MHz, one segment")
+        eq(spans(mk("x", -50, 1, .ghz24, 40)), [[2402, 2442, 0.5], [2382, 2422, 0.5]],
+           "2.4 GHz ch1 HT40 → control + secondary above (2402–2442) or below (2382–2422), half each")
+        eq(mk("x", -50, 1, .ghz24, 40).energySpans.map { $0.share }.reduce(0, +), 1, "HT40 shares sum to 1")
 
         // Codable: the scan helper ships BSS values back over JSON verbatim, so every
         // stored field must survive the trip (band as its raw Int, optional airtime).
@@ -144,7 +158,11 @@ func order(_ nets: [BSS]) -> String { nets.map { $0.ssid }.joined() }
         eq(ChannelPlan.coveredChannels(band: .ghz5, control: 149, widthMHz: 80), [149, 153, 157, 161], "5G 80MHz @149")
         eq(ChannelPlan.coveredChannels(band: .ghz5, control: 36, widthMHz: 160),
            [36, 40, 44, 48, 52, 56, 60, 64], "5G 160MHz @36")
-        eq(ChannelPlan.coveredChannels(band: .ghz5, control: 165, widthMHz: 80), [165], "5G 80MHz @165 (no group → control)")
+        // UNII-3/4 tail: 165–177 bond too (an 80 MHz AP on 165 used to score as 20 MHz).
+        eq(ChannelPlan.coveredChannels(band: .ghz5, control: 165, widthMHz: 40), [165, 169], "5G 40MHz @165")
+        eq(ChannelPlan.coveredChannels(band: .ghz5, control: 177, widthMHz: 40), [173, 177], "5G 40MHz @177")
+        eq(ChannelPlan.coveredChannels(band: .ghz5, control: 165, widthMHz: 80), [165, 169, 173, 177], "5G 80MHz @165")
+        eq(ChannelPlan.coveredChannels(band: .ghz5, control: 132, widthMHz: 160), [132], "5G 160MHz @132 (no group → control)")
         eq(ChannelPlan.coveredChannels(band: .ghz5, control: 36, widthMHz: 240), [36], "5G unknown width → control only")
         eq(ChannelPlan.coveredChannels(band: .ghz6, control: 1, widthMHz: 40), [1, 5], "6G 40MHz @1")
         eq(ChannelPlan.coveredChannels(band: .ghz6, control: 1, widthMHz: 80), [1, 5, 9, 13], "6G 80MHz @1")
@@ -206,6 +224,30 @@ func order(_ nets: [BSS]) -> String { nets.map { $0.ssid }.joined() }
         let al = Analysis.loads([adj], band: .ghz24, candidates: [1, 6, 11])
         ok(abs(al[0].weighted - adj.linearPower * 0.5) < 1e-12, "ch3 half-overlaps candidate 1")
         ok(al[1].weighted > 0 && al[2].weighted == 0, "ch3 bleeds into 6 but not 11")
+
+        // HT40 in 2.4 GHz. An HT40+ AP on ch 1 occupies 2402–2442 MHz, so the ch 6 slot
+        // (2427–2447) really sees 15 of its 40 MHz; a block centred on the control frequency
+        // (2392–2432) gave it 5 and recommended ch 6 as clean. With the secondary's side
+        // unknown, the above placement counts at half weight: 0.5 × 15/40 of the energy.
+        let ht40 = mk("ht", -50, 1, .ghz24, 40)
+        let hl = Analysis.loads([ht40], band: .ghz24, candidates: [1, 6, 11])
+        ok(abs(hl[0].weighted - ht40.linearPower * 0.5) < 1e-12, "HT40 on ch1: control slot collects both placements' share (1/2)")
+        ok(abs(hl[1].weighted - ht40.linearPower * 0.1875) < 1e-12, "HT40 on ch1: ch 6 gets 0.5 × 15/40 of the energy")
+        ok(hl[1].weighted > ht40.linearPower * 5.0 / 40.0, "…more than the 5/40 the centred model gave it")
+        eq(hl[1].apCount, 1, "HT40 AP counts once on ch 6, not once per placement")
+        ok(hl[2].weighted == 0 && hl[2].apCount == 0, "HT40 on ch1 cannot reach ch 11")
+        // Symmetric around the control channel, and the energy is conserved: the three
+        // 20 MHz slots that tile the ±30 envelope (ch 2, 6, 10) collect all of it.
+        let ht6 = mk("ht", -50, 6, .ghz24, 40)
+        let sl = Analysis.loads([ht6], band: .ghz24, candidates: [1, 11, 2, 6, 10])
+        ok(abs(sl[0].weighted - sl[1].weighted) < 1e-15 && sl[0].weighted > 0, "HT40 on ch6 bleeds equally into 1 and 11")
+        ok(abs(sl[2].weighted + sl[3].weighted + sl[4].weighted - ht6.linearPower) < 1e-12,
+           "HT40 energy over the slots tiling its envelope sums to the AP's power")
+        // The ranking consequence: HT40 on ch 1 makes ch 11 the cleanest, and ch 6 is no
+        // longer a near-tie with it.
+        let rec24 = Analysis.recommend([ht40], band: .ghz24, candidates: ChannelPlan.cand24)
+        eq(rec24.first!.channel, 11, "HT40 on ch1 → ch 11 recommended")
+        ok(rec24[1].channel == 6 && rec24[1].weighted > 0, "…and ch 6 is ranked as busy, not clean")
 
         // QBSS airtime discounts mostly-idle APs (10% floor); unknown assumed busy.
         let idle = Analysis.loads([mk("i", -50, 36, .ghz5, util: 0.02)], band: .ghz5, candidates: [36])[0].weighted

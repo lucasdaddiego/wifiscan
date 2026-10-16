@@ -49,6 +49,7 @@ func order(_ nets: [BSS]) -> String { nets.map { $0.ssid }.joined() }
         testAnsi()
         testReport()
         testCSI()
+        testArguments()
 
         print("\(checks - failures)/\(checks) checks passed")
         exit(failures == 0 ? 0 : 1)
@@ -831,5 +832,54 @@ func order(_ nets: [BSS]) -> String { nets.map { $0.ssid }.joined() }
         eq(decodeCSI(b("<65;3;4m")), .mouse(MouseEvent(button: 65, col: 3, row: 4, press: false)), "SGR release / wheel")
         eq(decodeCSI(b("<0;12M")), .none, "a mouse report missing a field is dropped")
         eq(decodeCSI(b("<0;12;7X")), .none, "a < sequence with another final byte is not a mouse report")
+    }
+
+    // MARK: Command line
+
+    static func testArguments() {
+        func err(_ a: [String]) -> String? {
+            if case .failure(let e) = parseArguments(a) { return e.message }
+            return nil
+        }
+        eq(parseArguments([]), .success(Options()), "no flags → TUI")
+        eq(parseArguments(["--once"]), .success(Options(mode: .once)), "--once")
+        eq(parseArguments(["--json"]), .success(Options(mode: .json)), "--json")
+        eq(parseArguments(["--diag"]), .success(Options(mode: .diag)), "--diag")
+        eq(parseArguments(["--json", "--json"]), .success(Options(mode: .json)), "repeating a mode is harmless")
+        eq(parseArguments(["--report", "~/s.jsonl"]), .success(Options(mode: .report, reportPath: "~/s.jsonl")),
+           "--report FILE, path as typed (main expands ~)")
+        eq(parseArguments(["--help"]), .success(Options(mode: .help)), "--help")
+        eq(parseArguments(["-h"]), .success(Options(mode: .help)), "-h")
+        eq(parseArguments(["--bogus", "--help"]), .success(Options(mode: .help)), "--help anywhere wins, as before")
+        eq(parseArguments(["--version"]), .success(Options(mode: .version)), "--version")
+        eq(parseArguments(["--json", "-V"]), .success(Options(mode: .version)), "-V wins over a mode")
+
+        eq(parseArguments(["--json", "--band", "5", "--sort", "chan", "--exclude-ssid", "a,b", "--exclude-ssid", "c",
+                           "--log", "s.jsonl"]),
+           .success(Options(mode: .json, band: .some(.ghz5), sort: .channel, excludeSSIDs: ["a", "b", "c"], logPath: "s.jsonl")),
+           "valued options, exclusions accumulate")
+        eq(parseArguments(["--band", "all"]), .success(Options(band: .some(nil))), "--band all → an explicit no-filter")
+        eq(parseArguments(["--band", "2.4"]).map { $0.band }, .success(.some(.ghz24)), "--band 2.4")
+
+        // Two modes used to resolve silently: `--diag --json` ran the diagnostics and exited
+        // 0, so a script expecting JSON parsed text.
+        eq(err(["--diag", "--json"]), "error: --diag and --json are mutually exclusive (see --help)", "two modes")
+        eq(err(["--once", "--report", "x"]), "error: --once and --report are mutually exclusive (see --help)",
+           "--report is a mode too")
+
+        eq(err(["--band"]), "error: --band needs 2.4|5|6|all (see --help)", "--band without a value")
+        eq(err(["--band", "7"]), "error: --band needs 2.4|5|6|all (see --help)", "--band unknown")
+        eq(err(["--sort", "colour"]), "error: --sort needs power|snr|channel|name|band|width|security|load (see --help)",
+           "--sort unknown")
+        eq(err(["--exclude-ssid", ""]), "error: --exclude-ssid needs a network name (see --help)", "--exclude-ssid empty")
+        eq(err(["--log"]), "error: --log needs a file path (see --help)", "--log without a value")
+        eq(err(["--report"]), "error: --report needs a file path (see --help)", "--report without a value")
+        eq(err(["--fast"]), "error: unknown option '--fast' (see --help)", "unknown flag")
+
+        // Every --sort name maps to a key, and every key's prefs name maps back to it.
+        for k in [SortKey.power, .snr, .channel, .name, .band, .width, .security, .util] {
+            eq(sortNames[k.label.lowercased()], k, "prefs round-trip for \(k.label)")
+        }
+        eq(cmpDir(1.5, 2.5, desc: true), 1, "cmpDir works on Double too")
     }
 }

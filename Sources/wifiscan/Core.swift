@@ -442,13 +442,9 @@ enum SortKey {
 }
 
 /// Three-way compare with a direction flag: -1 ⇒ x first, 0 ⇒ tie, +1 ⇒ y first.
-/// `desc: true` puts the larger value first (most keys' default direction).
-func cmpDir(_ x: Int, _ y: Int, desc: Bool) -> Int {
-    if x == y { return 0 }
-    return (x < y) != desc ? -1 : 1
-}
-/// Double overload (QBSS utilization sorting).
-func cmpDir(_ x: Double, _ y: Double, desc: Bool) -> Int {
+/// `desc: true` puts the larger value first (most keys' default direction). Generic, so
+/// the Int keys and the Double QBSS utilization share one body.
+func cmpDir<T: Comparable>(_ x: T, _ y: T, desc: Bool) -> Int {
     if x == y { return 0 }
     return (x < y) != desc ? -1 : 1
 }
@@ -505,6 +501,87 @@ func netBefore(_ a: BSS, _ b: BSS, by key: SortKey, ascending: Bool = false) -> 
 
 func sortNets(_ nets: [BSS], by key: SortKey, ascending: Bool) -> [BSS] {
     nets.sorted { netBefore($0, $1, by: key, ascending: ascending) }
+}
+
+// MARK: - Command line
+
+/// Shared by --sort and the prefs file (SortKey.label.lowercased() maps back here).
+let sortNames: [String: SortKey] = [
+    "power": .power, "snr": .snr, "chan": .channel, "channel": .channel, "name": .name,
+    "band": .band, "width": .width, "sec": .security, "security": .security,
+    "load": .util, "util": .util,
+]
+/// Shared by --band and the prefs file ("all" → no filter).
+let bandNames: [String: Band?] = [
+    "2.4": .ghz24, "2": .ghz24, "24": .ghz24, "5": .ghz5, "6": .ghz6, "all": nil,
+]
+
+enum Mode: Equatable { case tui, once, json, diag, report, help, version }
+
+/// Parsed command line (the internal `--scan-daemon` is handled before parsing). `band`
+/// is nil when --band was not given and `.some(nil)` for `--band all`. `logPath` and
+/// `reportPath` are as typed: main expands `~` and checks that the log is writable.
+struct Options: Equatable {
+    var mode: Mode = .tui
+    var band: Band?? = nil
+    var sort: SortKey? = nil
+    var excludeSSIDs: Set<String> = []
+    var logPath: String? = nil
+    var reportPath: String? = nil
+}
+
+/// A command-line usage error: the message main prints on stderr before exiting 2.
+struct UsageError: Error, Equatable {
+    let message: String
+    init(_ what: String) { message = "error: \(what) (see --help)" }
+}
+
+/// Parse argv (without argv[0]). `--help` / `-h` and `--version` / `-V` anywhere win, as
+/// before. The modes (`--once`, `--json`, `--diag`, `--report FILE`) are mutually
+/// exclusive: two of them used to resolve silently — `--diag --json` printed the
+/// diagnostics text with exit 0 to a script that expected JSON — and are now a usage error.
+func parseArguments(_ args: [String]) -> Result<Options, UsageError> {
+    if args.contains("--help") || args.contains("-h") { return .success(Options(mode: .help)) }
+    if args.contains("--version") || args.contains("-V") { return .success(Options(mode: .version)) }
+    let modeFlags: [String: Mode] = ["--once": .once, "--json": .json, "--diag": .diag, "--report": .report]
+    var o = Options()
+    var modeFlag: String?
+    var i = 0
+    while i < args.count {
+        let a = args[i]
+        func value() -> String? { i += 1; return i < args.count ? args[i] : nil }
+        if let m = modeFlags[a] {
+            if let other = modeFlag, other != a {
+                return .failure(UsageError("\(other) and \(a) are mutually exclusive"))
+            }
+            o.mode = m; modeFlag = a
+        }
+        switch a {
+        case "--once", "--json", "--diag":
+            break
+        case "--report":
+            guard let v = value(), !v.isEmpty else { return .failure(UsageError("--report needs a file path")) }
+            o.reportPath = v
+        case "--band":
+            guard let v = value(), let b = bandNames[v] else { return .failure(UsageError("--band needs 2.4|5|6|all")) }
+            o.band = .some(b)
+        case "--sort":
+            guard let v = value(), let k = sortNames[v] else {
+                return .failure(UsageError("--sort needs power|snr|channel|name|band|width|security|load"))
+            }
+            o.sort = k
+        case "--exclude-ssid":
+            guard let v = value(), !v.isEmpty else { return .failure(UsageError("--exclude-ssid needs a network name")) }
+            o.excludeSSIDs.formUnion(v.split(separator: ",").map(String.init))
+        case "--log":
+            guard let v = value(), !v.isEmpty else { return .failure(UsageError("--log needs a file path")) }
+            o.logPath = v
+        default:
+            return .failure(UsageError("unknown option '\(a)'"))
+        }
+        i += 1
+    }
+    return .success(o)
 }
 
 // MARK: - CoreWLAN value mappings (kept here so they're unit-testable without the framework)

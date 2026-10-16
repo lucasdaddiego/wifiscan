@@ -987,17 +987,6 @@ struct Prefs: Codable {
 
 let prefsPath = NSHomeDirectory() + "/.config/wifiscan/config.json"
 
-/// Shared by --sort and the prefs file (SortKey.label.lowercased() maps back here).
-let sortNames: [String: SortKey] = [
-    "power": .power, "snr": .snr, "chan": .channel, "channel": .channel, "name": .name,
-    "band": .band, "width": .width, "sec": .security, "security": .security,
-    "load": .util, "util": .util,
-]
-/// Shared by --band and the prefs file ("all" → no filter).
-let bandNames: [String: Band?] = [
-    "2.4": .ghz24, "2": .ghz24, "24": .ghz24, "5": .ghz5, "6": .ghz6, "all": nil,
-]
-
 func loadPrefs(into app: App) {
     guard let data = FileManager.default.contents(atPath: prefsPath),
           let p = try? JSONDecoder().decode(Prefs.self, from: data) else { return }
@@ -1442,6 +1431,7 @@ func printHelp() {
                                  (the connected SSID is always excluded)
       --log <file>               append every scan to a JSONL survey log
 
+    The modes (--once, --json, --diag, --report) are mutually exclusive.
     --once and --json exit 3 (with a line on stderr) when the scan helper failed — not
     running from the .app bundle, no Wi-Fi interface, helper timeout — so an empty result
     is distinguishable from a scan that never happened. Usage errors exit 2; a signal
@@ -1469,12 +1459,6 @@ func die(_ msg: String) -> Never {
 func main() {
     let args = Array(CommandLine.arguments.dropFirst())
 
-    // Answered before the App (and its CoreWLAN client) exists: these need no radio.
-    if args.contains("--help") || args.contains("-h") { printHelp(); return }
-    if args.contains("--version") || args.contains("-V") { print("wifiscan \(wifiscanVersion)"); return }
-
-    let app = App()
-
     // Internal helper mode — reached only when relaunched via `open`, never typed.
     // The daemon REMOVES this dir when the front-end stops heart-beating, so accept
     // only the shape HelperClient.startHelper creates; a hand-typed path (the flag is
@@ -1488,45 +1472,23 @@ func main() {
         return
     }
 
-    // Parse: bare mode switches plus valued options. Anything unrecognised is a
-    // clean error exit (also turns a stray legacy `--scan-json` launch into an
-    // error rather than a Terminal pop-up).
-    var modes = Set<String>()
-    var bandFlag: Band?? = nil          // parsed --band ("all" → .some(nil))
-    var sortFlag: SortKey?
-    var reportPath: String?
-    var i = 0
-    while i < args.count {
-        let a = args[i]
-        func value() -> String? { i += 1; return i < args.count ? args[i] : nil }
-        switch a {
-        case "--once", "--json", "--diag":
-            modes.insert(a)
-        case "--band":
-            guard let v = value(), let b = bandNames[v] else { die("--band needs 2.4|5|6|all") }
-            bandFlag = b
-        case "--sort":
-            guard let v = value(), let k = sortNames[v] else {
-                die("--sort needs power|snr|channel|name|band|width|security|load")
-            }
-            sortFlag = k
-        case "--exclude-ssid":
-            guard let v = value(), !v.isEmpty else { die("--exclude-ssid needs a network name") }
-            app.excludeSSIDs.formUnion(v.split(separator: ",").map(String.init))
-        case "--log":
-            guard let v = value(), !v.isEmpty else { die("--log needs a file path") }
-            let p = (v as NSString).expandingTildeInPath
-            guard canWriteSurveyLog(p) else {
-                die("cannot write survey log '\(p)' — check the path and that its directory exists")
-            }
-            app.logPath = p
-        case "--report":
-            guard let v = value(), !v.isEmpty else { die("--report needs a file path") }
-            reportPath = (v as NSString).expandingTildeInPath
-        default:
-            die("unknown option '\(a)'")
+    let opts: Options
+    switch parseArguments(args) {
+    case .success(let o): opts = o
+    case .failure(let e): FileHandle.standardError.write(Data((e.message + "\n").utf8)); exit(2)
+    }
+    // Answered before the App (and its CoreWLAN client) exists: these need no radio.
+    if opts.mode == .help { printHelp(); return }
+    if opts.mode == .version { print("wifiscan \(wifiscanVersion)"); return }
+
+    let app = App()
+    app.excludeSSIDs = opts.excludeSSIDs
+    if let v = opts.logPath {
+        let p = (v as NSString).expandingTildeInPath
+        guard canWriteSurveyLog(p) else {
+            die("cannot write survey log '\(p)' — check the path and that its directory exists")
         }
-        i += 1
+        app.logPath = p
     }
 
     // Colour is automatic: on for an interactive terminal, off when piped/redirected
@@ -1534,19 +1496,22 @@ func main() {
     Ansi.enabled = ProcessInfo.processInfo.environment["NO_COLOR"] == nil && isatty(STDOUT_FILENO) != 0
 
     // Report mode reads only the log file — no scan, no daemon, no TTY needed.
-    if let path = reportPath { runReport(path: path, app: app); return }
+    if opts.mode == .report, let path = opts.reportPath {
+        runReport(path: (path as NSString).expandingTildeInPath, app: app)
+        return
+    }
 
     sweepStaleTempFiles()
 
-    let interactive = modes.isEmpty
+    let interactive = opts.mode == .tui
 
     // Restore last-used view settings, then let explicit flags override them. TUI
     // only: --json/--once must be reproducible across machines (the README documents
     // --json as strongest-first), so yesterday's keystroke in the TUI must not
     // reorder a script's output. --sort stays the way to change one-shot ordering.
     if interactive { loadPrefs(into: app) }
-    if let b = bandFlag { app.bandFilter = b }
-    if let k = sortFlag { app.sortKey = k; app.ascending = false }
+    if let b = opts.band { app.bandFilter = b }
+    if let k = opts.sort { app.sortKey = k; app.ascending = false }
 
     // If launched without a terminal to draw to (Finder/Spotlight/Dock), reopen in
     // Terminal. One-shot/pipe modes are exempt — they run headless.
@@ -1564,9 +1529,12 @@ func main() {
 
     // Diagnostics and one-shot modes must run even with the radio off (that's
     // exactly when you reach for --diag), so the power check gates only the TUI.
-    if modes.contains("--diag") { runDiag(app: app); return }
-    if modes.contains("--json") { runOnce(app: app, json: true); return }
-    if modes.contains("--once") { runOnce(app: app, json: false); return }
+    switch opts.mode {
+    case .diag: runDiag(app: app); return
+    case .json: runOnce(app: app, json: true); return
+    case .once: runOnce(app: app, json: false); return
+    case .tui, .report, .help, .version: break
+    }
 
     if !app.scanner.powerOn {
         FileHandle.standardError.write(Data("Wi-Fi is powered off (interface \(app.scanner.interfaceName)). Turn it on and retry.\n".utf8))

@@ -48,6 +48,7 @@ func order(_ nets: [BSS]) -> String { nets.map { $0.ssid }.joined() }
         testNetworkJSON()
         testAnsi()
         testReport()
+        testCSI()
 
         print("\(checks - failures)/\(checks) checks passed")
         exit(failures == 0 ? 0 : 1)
@@ -811,5 +812,24 @@ func order(_ nets: [BSS]) -> String { nets.map { $0.ssid }.joined() }
 
         Ansi.enabled = true
         ok(report(scans)[0].hasPrefix("\u{1B}[1m"), "the header is bold when colour is on")
+    }
+
+    // MARK: Keyboard / mouse input
+
+    static func testCSI() {
+        let b = { (s: String) in Array(s.utf8) }
+        ok(isCSIFinal(0x41) && isCSIFinal(0x7E) && isCSIFinal(0x40), "A, ~ and @ end a CSI sequence")
+        ok(!isCSIFinal(0x3B) && !isCSIFinal(0x35) && !isCSIFinal(0x7F), "; digits and DEL do not")
+        eq(decodeCSI(b("A")), .key("k"), "↑ → k")
+        eq(decodeCSI(b("B")), .key("j"), "↓ → j")
+        eq(decodeCSI(b("5~")), .key("u"), "PgUp → u")
+        eq(decodeCSI(b("6~")), .key("d"), "PgDn → d")
+        eq(decodeCSI(b("C")), .none, "→ has no binding")
+        eq(decodeCSI(b("1;5A")), .none, "a modified arrow (Ctrl-↑) is not a bare ↑")
+        eq(decodeCSI([]), .none, "an empty body decodes to nothing")
+        eq(decodeCSI(b("<0;12;7M")), .mouse(MouseEvent(button: 0, col: 12, row: 7, press: true)), "SGR press")
+        eq(decodeCSI(b("<65;3;4m")), .mouse(MouseEvent(button: 65, col: 3, row: 4, press: false)), "SGR release / wheel")
+        eq(decodeCSI(b("<0;12M")), .none, "a mouse report missing a field is dropped")
+        eq(decodeCSI(b("<0;12;7X")), .none, "a < sequence with another final byte is not a mouse report")
     }
 }

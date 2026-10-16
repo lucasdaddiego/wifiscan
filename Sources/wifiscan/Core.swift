@@ -824,6 +824,43 @@ func clipAnsi(_ s: String, _ cols: Int) -> String {
     return out
 }
 
+// MARK: - Keyboard / mouse input (escape sequences)
+
+/// A decoded mouse report (SGR 1006). `col`/`row` are 1-based screen cells.
+struct MouseEvent: Equatable { let button: Int; let col: Int; let row: Int; let press: Bool }
+
+/// One unit of input: a single-key command, a mouse report, or nothing this tick.
+enum Input: Equatable { case key(Character), mouse(MouseEvent), none }
+
+/// True for the byte that ends a CSI sequence (`ESC [ … final`, final in 0x40–0x7E). The
+/// reader drains up to it — the WHOLE sequence, not a fixed byte count — so a mouse
+/// report's digits can never leak out as stray single-key commands.
+func isCSIFinal(_ b: UInt8) -> Bool { (0x40...0x7E).contains(b) }
+
+/// Decode the body of a CSI / SS3 sequence (everything after `ESC [` or `ESC O`, final
+/// byte included): an SGR mouse report `< b ; x ; y` + `M` (press) / `m` (release), or an
+/// arrow / paging key as its letter twin (↑ k, ↓ j, PgUp u, PgDn d). The TUI has no text
+/// field, so a synthesised key can never be typed into one; these used to be drained and
+/// dropped, so ↓ did nothing. Anything else decodes to nothing.
+func decodeCSI(_ body: [UInt8]) -> Input {
+    if let first = body.first, first == 0x3C /* < */,
+       let final = body.last, final == 0x4D /* M */ || final == 0x6D /* m */ {
+        let nums = String(decoding: body.dropFirst().dropLast(), as: UTF8.self)
+            .split(separator: ";").compactMap { Int($0) }
+        if nums.count == 3 {
+            return .mouse(MouseEvent(button: nums[0], col: nums[1], row: nums[2], press: final == 0x4D))
+        }
+        return .none
+    }
+    switch body {
+    case [0x41]:       return .key("k")   // ↑
+    case [0x42]:       return .key("j")   // ↓
+    case [0x35, 0x7E]: return .key("u")   // PgUp  (ESC [ 5 ~)
+    case [0x36, 0x7E]: return .key("d")   // PgDn  (ESC [ 6 ~)
+    default:           return .none
+    }
+}
+
 // MARK: - Terminal-safe SSID display
 //
 // SSIDs arrive from the radio as arbitrary bytes — a hostile access point can name

@@ -491,22 +491,28 @@ private let leaveSequence = "\u{1B}[?1006l\u{1B}[?1000l\u{1B}[?25h\u{1B}[?1049l\
 nonisolated(unsafe) private var leaveBytes: UnsafeMutablePointer<UInt8>?
 nonisolated(unsafe) private var leaveByteCount = 0
 
-/// Write all of `s`. One write(2) can return short (a signal lands mid-write, a full
-/// pty) or fail with EINTR, and a single call then dropped the rest — e.g. the tail of
-/// the leave sequence, leaving the alt screen up and the cursor hidden. Retry until
-/// every byte is out; give up only on a real error or a zero-byte write.
+/// Write `count` bytes to stdout. One write(2) can return short (a signal lands
+/// mid-write, a full pty) or fail with EINTR, and a single call then dropped the rest —
+/// e.g. the tail of the leave sequence, leaving the alt screen up and the cursor hidden.
+/// Retry until every byte is out; give up only on a real error or a zero-byte write.
+/// Async-signal-safe (write(2) and nothing else), so the frame path and the signal
+/// handler share this one loop.
+private func writeAll(_ p: UnsafePointer<UInt8>, _ count: Int) {
+    var off = 0
+    while off < count {
+        let n = write(STDOUT_FILENO, p + off, count - off)
+        if n < 0 { if errno == EINTR { continue }; return }
+        if n == 0 { return }
+        off += n
+    }
+}
+
+/// Write all of `s` straight to the fd. Every byte the TUI emits goes through here —
+/// enter/leave sequences, the window title and each frame — so raw writes never
+/// interleave with buffered stdio.
 private func writeRaw(_ s: String) {
     let bytes = Array(s.utf8)
-    bytes.withUnsafeBufferPointer { buf in
-        guard let base = buf.baseAddress else { return }
-        var off = 0
-        while off < buf.count {
-            let n = write(STDOUT_FILENO, base + off, buf.count - off)
-            if n < 0 { if errno == EINTR { continue }; return }
-            if n == 0 { return }
-            off += n
-        }
-    }
+    bytes.withUnsafeBufferPointer { if let base = $0.baseAddress { writeAll(base, $0.count) } }
 }
 
 /// Snapshot the leave sequence into a plain C buffer. MUST run before the signal
@@ -566,23 +572,9 @@ private func leaveRaw() {
 private func leaveRawFromSignal() {
     guard rawActive != 0 else { return }
     rawActive = 0
-    if let p = leaveBytes {
-        var off = 0
-        while off < leaveByteCount {
-            let n = write(STDOUT_FILENO, p + off, leaveByteCount - off)
-            if n < 0 { if errno == EINTR { continue }; break }
-            if n == 0 { break }
-            off += n
-        }
-    }
+    if let p = leaveBytes { writeAll(p, leaveByteCount) }
     tcsetattr(STDIN_FILENO, TCSANOW, &savedTermios)
 }
-
-/// A decoded mouse report (SGR 1006). `col`/`row` are 1-based screen cells.
-struct MouseEvent { let button: Int; let col: Int; let row: Int; let press: Bool }
-
-/// One unit of input: a single-key command, a mouse report, or nothing this tick.
-enum Input { case key(Character), mouse(MouseEvent), none }
 
 /// One byte of lookahead: readInput peeks past an ESC to tell a lone Escape from a
 /// CSI/SS3 sequence, and when the next byte turns out to be an ordinary key (Esc then
@@ -610,35 +602,15 @@ private func readInput() -> Input {
     // a key typed fast enough to land in the same read window: deliver both — the Esc now,
     // the key on the next read — instead of dropping the key and the byte after it.
     guard b1 == 0x5B /* [ */ || b1 == 0x4F /* O */ else { pushedBack = b1; return .key("\u{1B}") }
-    // Drain the CSI body up to its final byte (0x40–0x7E). Draining the WHOLE sequence
-    // — not a fixed byte count — is what keeps a mouse report's digits from leaking out
-    // as stray single-key commands. 32 bytes is well above any real sequence.
+    // Drain the CSI body up to its final byte, then let Core decode it: an SGR mouse
+    // report, an arrow / paging key, or nothing. 32 bytes is well above any real sequence.
     var body = [UInt8]()
     for _ in 0..<32 {
         guard let c = readByte() else { break }
         body.append(c)
-        if (0x40...0x7E).contains(c) { break }
+        if isCSIFinal(c) { break }
     }
-    // SGR mouse: "ESC [ < b ; x ; y" then 'M' (press) or 'm' (release).
-    if let first = body.first, first == 0x3C /* < */,
-       let final = body.last, final == 0x4D /* M */ || final == 0x6D /* m */ {
-        let nums = String(decoding: body.dropFirst().dropLast(), as: UTF8.self)
-            .split(separator: ";").compactMap { Int($0) }
-        if nums.count == 3 {
-            return .mouse(MouseEvent(button: nums[0], col: nums[1], row: nums[2], press: final == 0x4D))
-        }
-        return .none
-    }
-    // Arrow and paging keys act as their letter twins. The TUI has no text field, so a
-    // synthesised key can never land in one; these used to be drained and dropped, so ↓
-    // did nothing.
-    switch body {
-    case [0x41]:       return .key("k")   // ↑
-    case [0x42]:       return .key("j")   // ↓
-    case [0x35, 0x7E]: return .key("u")   // PgUp  (ESC [ 5 ~)
-    case [0x36, 0x7E]: return .key("d")   // PgDn  (ESC [ 6 ~)
-    default:           return .none
-    }
+    return decodeCSI(body)
 }
 
 // MARK: - Interactive loop
@@ -777,7 +749,7 @@ func draw(_ app: App) {
         let title = "wifiscan — \(snap.nets.count) networks · \(snap.iface)"
         if title != app.lastTitle {
             app.lastTitle = title
-            print("\u{1B}]2;\(title)\u{07}", terminator: "")
+            writeRaw("\u{1B}]2;\(title)\u{07}")
         }
     }
 
@@ -880,8 +852,7 @@ func draw(_ app: App) {
     app.lastRows = layout.rows
     // Synchronized output (DEC 2026): the terminal buffers the whole frame and swaps
     // it in one shot, so a refresh never tears. Ignored by terminals that lack it.
-    print("\u{1B}[?2026h" + screen + "\u{1B}[?2026l", terminator: "")
-    fflush(stdout)
+    writeRaw("\u{1B}[?2026h" + screen + "\u{1B}[?2026l")
 }
 
 /// Key hints sized to the window: the widest variant that fits, so the line never

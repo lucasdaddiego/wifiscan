@@ -1043,15 +1043,9 @@ func runOnce(app: App, json: Bool) {
     if let bf = app.bandFilter { all = all.filter { $0.band == bf } }
     let nets = sortNets(all, by: app.sortKey, ascending: app.ascending)
     if json {
-        struct Out: Encodable {
-            let ssid: String; let rssi: Int; let noise: Int?
-            let snr: Int?; let channel: Int; let band: String; let widthMHz: Int
-            let security: String; let hidden: Bool; let utilization: Double?
-        }
-        let arr = nets.map { Out(ssid: $0.ssid, rssi: $0.rssi,
-            noise: $0.noiseValid ? $0.noise : nil, snr: $0.snr, channel: $0.channel,
-            band: $0.band.longLabel, widthMHz: $0.widthMHz, security: $0.security,
-            hidden: $0.hidden, utilization: $0.utilization) }
+        let iso = ISO8601DateFormatter(); iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let ts = iso.string(from: Date())   // one stamp for the whole array: it is one scan
+        let arr = nets.map { NetworkJSON($0, ts: ts, version: wifiscanVersion) }
         let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted, .sortedKeys]
         if let d = try? enc.encode(arr), let s = String(data: d, encoding: .utf8) { print(s) }
         else { print("[]") }

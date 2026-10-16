@@ -340,10 +340,14 @@ the live modes do), so the file is also easy to post‑process with `jq`.
 `wifiscan --json` prints a pretty array, sorted by signal power (strongest first);
 object keys are alphabetised. `noise` and `snr` are present only when macOS actually
 measured them, and `utilization` (QBSS airtime, 0…1) only when the AP broadcasts it
-(otherwise omitted). If the scan helper failed (not running from the `.app` bundle, no
-Wi‑Fi interface, helper timeout) the array is still printed, but a one‑line reason goes to
-stderr and the exit status is **3** — so a script never mistakes "the scan never ran" for
-"no networks in range":
+(otherwise omitted). **`ssid` is sanitized** the way the table is (C0 / C1 / Cf characters
+become `·` — `JSONEncoder` escapes C0 but not C1 or Cf, so a hostile name could otherwise
+reach your terminal through `jq -r`); the name's bytes as broadcast are in **`ssidHex`**
+(absent for a hidden network). Every object carries **`ts`** (when the scan was printed,
+ISO 8601) and **`version`** (the wifiscan that printed it). If the scan helper failed (not
+running from the `.app` bundle, no Wi‑Fi interface, helper timeout) the array is still
+printed, but a one‑line reason goes to stderr and the exit status is **3** — so a script
+never mistakes "the scan never ran" for "no networks in range":
 
 ```jsonc
 [
@@ -354,6 +358,9 @@ stderr and the exit status is **3** — so a script never mistakes "the scan nev
     "rssi": -34,
     "security": "WPA2/3",
     "ssid": "home-router",
+    "ssidHex": "686f6d652d726f75746572",
+    "ts": "2026-10-15T18:04:11.532Z",
+    "version": "1.0",
     "widthMHz": 20
   },
   {
@@ -365,6 +372,9 @@ stderr and the exit status is **3** — so a script never mistakes "the scan nev
     "security": "WPA2/3",
     "snr": 49,
     "ssid": "home-router-5G",
+    "ssidHex": "686f6d652d726f757465722d3547",
+    "ts": "2026-10-15T18:04:11.532Z",
+    "version": "1.0",
     "widthMHz": 80
   }
 ]

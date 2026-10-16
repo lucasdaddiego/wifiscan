@@ -45,6 +45,7 @@ func order(_ nets: [BSS]) -> String { nets.map { $0.ssid }.joined() }
         testLayout()
         testSanitize()
         testDaemonDir()
+        testNetworkJSON()
 
         print("\(checks - failures)/\(checks) checks passed")
         exit(failures == 0 ? 0 : 1)
@@ -658,5 +659,48 @@ func order(_ nets: [BSS]) -> String { nets.map { $0.ssid }.joined() }
         ok(!isDaemonControlDir(t + "wifiscan-daemon-", tempRoot: t), "empty pid refused")
         ok(!isDaemonControlDir(t + "wifiscan-daemon-12a", tempRoot: t), "non-numeric pid refused")
         ok(!isDaemonControlDir(t + "notes", tempRoot: t), "unrelated dir inside temp refused")
+    }
+
+    // MARK: JSON output (--json array element)
+
+    /// Encode one network the way --json does and decode it back to a dictionary.
+    static func jsonObject(_ b: BSS) -> [String: Any] {
+        let enc = JSONEncoder(); enc.outputFormatting = [.sortedKeys]
+        let data = try! enc.encode(NetworkJSON(b, ts: "2026-10-15T12:00:00.000Z", version: "1.0"))
+        return try! JSONSerialization.jsonObject(with: data) as! [String: Any]
+    }
+
+    static func testNetworkJSON() {
+        eq(hexString([0x00, 0xAB, 0x7F]), "00ab7f", "hexString: lowercase, two digits per byte")
+        eq(hexString([]), "", "hexString of nothing is empty")
+
+        let full = jsonObject(mk("Home", -48, 36, .ghz5, 80, noise: -92, sec: "WPA3", util: 0.25))
+        eq(full["ssid"] as? String, "Home", "a printable name is unchanged")
+        eq(full["ssidHex"] as? String, "486f6d65", "ssidHex carries the bytes as broadcast")
+        eq(full["rssi"] as? Int, -48, "rssi")
+        eq(full["noise"] as? Int, -92, "measured noise is present")
+        eq(full["snr"] as? Int, 44, "snr when noise is measured")
+        eq(full["channel"] as? Int, 36, "channel")
+        eq(full["band"] as? String, "5 GHz", "band uses the long label")
+        eq(full["widthMHz"] as? Int, 80, "width")
+        eq(full["security"] as? String, "WPA3", "security")
+        eq(full["hidden"] as? Bool, false, "hidden flag")
+        eq(full["utilization"] as? Double, 0.25, "QBSS utilization when broadcast")
+        eq(full["ts"] as? String, "2026-10-15T12:00:00.000Z", "every object carries ts")
+        eq(full["version"] as? String, "1.0", "every object carries version")
+
+        let bare = jsonObject(mk("x", -70, 6, .ghz24))
+        ok(bare["noise"] == nil && bare["snr"] == nil && bare["utilization"] == nil,
+           "unmeasured noise / snr and absent QBSS are omitted, not null")
+
+        // A hostile name: JSONEncoder escapes C0 but passes C1 (U+009B, the 8-bit CSI) and
+        // Cf through, so `jq -r .ssid` used to print a live escape sequence.
+        let evil = jsonObject(mk("ev\u{9B}31mil\u{202E}", -50, 1, .ghz24))
+        eq(evil["ssid"] as? String, "ev·31mil·", "ssid is sanitized like the table")
+        eq(evil["ssidHex"] as? String, "6576c29b33316d696ce280ae", "ssidHex keeps the raw bytes")
+
+        let hidden = jsonObject(mk("‹hidden›", -60, 11, .ghz24, hidden: true))
+        eq(hidden["ssid"] as? String, "‹hidden›", "a hidden network keeps the marker")
+        ok(hidden["ssidHex"] == nil, "a hidden network has no ssidHex: the marker is not a name")
     }
 }

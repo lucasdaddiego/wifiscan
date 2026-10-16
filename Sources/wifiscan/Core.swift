@@ -680,9 +680,10 @@ func frameBytes(_ rows: [String], clear: Bool) -> String {
 // SSIDs arrive from the radio as arbitrary bytes — a hostile access point can name
 // itself with ANSI escape sequences, carriage returns, etc. Printing such a name raw
 // would let it move the cursor, recolour or clear the terminal, or corrupt the table
-// layout. So every SSID is run through sanitizeSSID before it reaches the screen.
-// (One-shot JSON output keeps the raw name: JSONEncoder escapes control bytes, so the
-// JSON stays valid and inert until a consumer chooses to render it.)
+// layout. So every SSID is run through sanitizeSSID before it reaches the screen — and
+// before it reaches the `--json` `ssid` too: JSONEncoder escapes C0 but not C1 or Cf, so
+// `jq -r` would hand an 8-bit CSI straight to the terminal. The bytes as broadcast stay
+// available in the JSON `ssidHex` (see NetworkJSON).
 
 /// Replace C0 control characters (incl. ESC, CR, LF, TAB), DEL, C1 controls, the
 /// line/paragraph separators and every Unicode format (Cf) scalar with a visible
@@ -735,4 +736,50 @@ func isDaemonControlDir(_ path: String, tempRoot: String) -> Bool {
     guard rest.hasPrefix("-") else { return false }     // e.g. "wifiscan-daemonX"
     let pid = rest.dropFirst()
     return !pid.isEmpty && pid.unicodeScalars.allSatisfy { (48...57).contains($0.value) }
+}
+
+// MARK: - JSON output (--json array element)
+
+/// Lowercase, unseparated hex of a byte run.
+func hexString(_ bytes: [UInt8]) -> String { bytes.map { String(format: "%02x", $0) }.joined() }
+
+/// One network as `--json` prints it. Optional fields are omitted when absent (synthesized
+/// Encodable uses encodeIfPresent): `noise` / `snr` only when macOS measured them,
+/// `utilization` only when the AP broadcasts QBSS. `ssid` is sanitized exactly like the
+/// table — a broadcast name carrying U+009B (an 8-bit CSI) used to come out of
+/// `wifiscan --json | jq -r '.[].ssid'` as a live escape sequence — and the name's bytes
+/// as broadcast are in `ssidHex` (absent for a hidden network, whose `ssid` is the
+/// `‹hidden›` marker, not a name). Every object carries `ts` (when the scan was printed)
+/// and `version` (the wifiscan that printed it), like blescan's JSON, so a saved capture
+/// explains itself.
+struct NetworkJSON: Encodable {
+    let ts: String
+    let version: String
+    let ssid: String
+    let ssidHex: String?
+    let rssi: Int
+    let noise: Int?
+    let snr: Int?
+    let channel: Int
+    let band: String
+    let widthMHz: Int
+    let security: String
+    let hidden: Bool
+    let utilization: Double?
+
+    init(_ b: BSS, ts: String, version: String) {
+        self.ts = ts
+        self.version = version
+        ssid = sanitizeSSID(b.ssid)
+        ssidHex = b.hidden ? nil : hexString(Array(b.ssid.utf8))
+        rssi = b.rssi
+        noise = b.noiseValid ? b.noise : nil
+        snr = b.snr
+        channel = b.channel
+        band = b.band.longLabel
+        widthMHz = b.widthMHz
+        security = b.security
+        hidden = b.hidden
+        utilization = b.utilization
+    }
 }

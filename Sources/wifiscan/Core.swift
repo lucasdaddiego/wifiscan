@@ -294,10 +294,13 @@ struct SurveyScan: Codable {
     ///   huge width stalls or crashes the run. No Wi-Fi channel is wider than 320 MHz.
     /// - utilization: it scales the energy, so a huge one hits the same +inf trap as
     ///   rssi. QBSS load is a fraction, 0…1.
+    /// - ts: the report's time range and hour buckets come from it. A wild value (1e300)
+    ///   formatted as an empty date — "08:05 → " in the header — and dropped the scan into
+    ///   a made-up hour. A log line is written between 1970 and 2100.
     /// Any of them out of range means the line is junk, and `--report` drops it exactly
     /// as it drops a truncated one.
     var plausible: Bool {
-        nets.allSatisfy {
+        (0...4_102_444_800).contains(ts) && nets.allSatisfy {
             $0.rssi <= 0 && (0...320).contains($0.widthMHz)
                 && $0.utilization.map { (0...1).contains($0) } ?? true
         }

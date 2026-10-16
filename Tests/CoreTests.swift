@@ -481,6 +481,12 @@ func order(_ nets: [BSS]) -> String { nets.map { $0.ssid }.joined() }
         ok(!one(util: 1e308).plausible, "absurd utilization → implausible line")
         ok(!one(util: -0.5).plausible, "negative utilization → implausible")
         ok(!one(util: .nan).plausible, "NaN utilization → implausible")
+        // ts drives the header's time range and the hour buckets.
+        ok(SurveyScan(ts: 1_791_965_100, nets: []).plausible, "a 2026 timestamp is plausible")
+        ok(SurveyScan(ts: 4_102_444_800, nets: []).plausible, "2100-01-01 is the upper bound")
+        ok(!SurveyScan(ts: 1e300, nets: []).plausible, "absurd timestamp → implausible line")
+        ok(!SurveyScan(ts: -1, nets: []).plausible, "pre-1970 timestamp → implausible line")
+        ok(!SurveyScan(ts: .nan, nets: []).plausible, "NaN timestamp → implausible line")
 
         // averageLoads: mean energy per scan (busy scan + empty scan → half), peak counts.
         let ap = mk("x", -50, 36, .ghz5)

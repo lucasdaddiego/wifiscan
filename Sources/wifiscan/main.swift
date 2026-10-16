@@ -713,12 +713,14 @@ func runInteractive(app: App) {
     prepareSignalSafeLeave()   // before the handlers: they must never build it themselves
     // Install restore-on-signal BEFORE mutating terminal state (closes the startup
     // race). leaveRawFromSignal() is async-signal-safe; _exit() skips stdio+atexit.
+    // Exit 128 + the signal number, the shell convention: `timeout 60 wifiscan` and a
+    // `kill` from a teardown script used to read as success (0).
     for sig in [SIGINT, SIGTERM] {
-        signal(sig) { _ in
+        signal(sig) { s in
             // kill() is async-signal-safe; reap the persistent helper on SIGTERM/SIGINT
             // so it doesn't linger (it would self-exit on heartbeat loss anyway).
             if helperPidGlobal > 0 { kill(helperPidGlobal, SIGTERM) }
-            leaveRawFromSignal(); _exit(0)
+            leaveRawFromSignal(); _exit(128 + s)
         }
     }
     atexit { leaveRaw() }
@@ -1585,7 +1587,8 @@ func printHelp() {
 
     --once and --json exit 3 (with a line on stderr) when the scan helper failed — not
     running from the .app bundle, no Wi-Fi interface, helper timeout — so an empty result
-    is distinguishable from a scan that never happened. Usage errors exit 2.
+    is distinguishable from a scan that never happened. Usage errors exit 2; a signal
+    exits 128 + its number.
 
     Colour is automatic: on in a terminal, off when piped/redirected (or set NO_COLOR).
 

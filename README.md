@@ -197,6 +197,10 @@ wifiscan --help                     # usage summary
 | `--version`, `-V` | Print the version. |
 | `--help`, `-h` | Show usage. |
 
+Exit status: `0` ok · `1` runtime error (Wi‑Fi off, no terminal for the TUI) · `2` usage ·
+`3` no scan performed (`--once` / `--json`) · `128 + signal` when killed, so `timeout` and
+`kill` read as what they are, not as success.
+
 Everything else is a **live** TUI control. Sort column, band filter and refresh
 interval are changed with keys while running (see
 [keyboard shortcuts](#keyboard-shortcuts)); sort, interval and auto‑refresh are

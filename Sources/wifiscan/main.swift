@@ -1040,10 +1040,10 @@ func canWriteSurveyLog(_ path: String) -> Bool {
 /// channel for each hour of day, plus the minimax all-day pick. Hours and dates are local.
 func runReport(path: String, app: App) {
     guard let raw = try? String(contentsOfFile: path, encoding: .utf8) else {
-        die("cannot read survey log '\(path)'")
+        fail("cannot read survey log '\(path)'")
     }
     let scans = Survey.parseLog(raw)
-    if scans.isEmpty { die("no usable scans in '\(path)' — record some with --log first") }
+    if scans.isEmpty { fail("no usable scans in '\(path)' — record some with --log first") }
 
     var excl = app.excludeSSIDs
     // Nil in practice: report mode runs no scan helper and macOS redacts the SSID from
@@ -1448,6 +1448,12 @@ func printHelp() {
     FILES:
       ~/.config/wifiscan/config.json   last-used view settings (restored at startup)
     """)
+}
+
+/// Print a runtime error to stderr and exit 1.
+func fail(_ msg: String) -> Never {
+    FileHandle.standardError.write(Data("error: \(msg)\n".utf8))
+    exit(1)
 }
 
 /// Print a usage error to stderr and exit 2.

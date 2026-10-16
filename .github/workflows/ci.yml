@@ -49,7 +49,7 @@ jobs:
           printf '%s\n' "$out" | grep -qxF '  all-day pick: ch 1  (worst hour clean)'
           printf '%s\n' "$out" | grep -qxF '  all-day pick: ch 153  (worst hour clean)'
           set +e; .build/wifiscan.app/Contents/MacOS/wifiscan --report /nonexistent 2>/dev/null; rc=$?; set -e
-          [ "$rc" = 2 ] || { echo "--report on a missing file exited $rc, want 2"; exit 1; }
+          [ "$rc" = 1 ] || { echo "--report on a missing file exited $rc, want 1"; exit 1; }
 
       # Fast, uninstrumented run of the dependency-free core unit tests.
       - name: Unit tests

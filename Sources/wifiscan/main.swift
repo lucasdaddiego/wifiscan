@@ -96,21 +96,10 @@ enum Term {
     }()
 }
 
-// MARK: - ANSI
+// MARK: - ANSI (terminal-capability half; the SGR wrappers, the palette and clipAnsi
+// live in Core.swift)
 
-enum Ansi {
-    /// Set once in main() before any other thread exists, read-only afterwards —
-    /// hence exempt from the Swift 6 global-state check.
-    nonisolated(unsafe) static var enabled = true
-    static func wrap(_ s: String, _ code: String) -> String {
-        enabled ? "\u{1B}[\(code)m\(s)\u{1B}[0m" : s
-    }
-    static func bold(_ s: String) -> String { wrap(s, "1") }
-    static func dim(_ s: String) -> String { wrap(s, "2") }
-    static func fg256(_ s: String, _ c: Int) -> String { wrap(s, "38;5;\(c)") }
-    static func bg256(_ s: String, _ c: Int) -> String { wrap(s, "48;5;\(c)") }
-    static func fgRGB(_ s: String, _ c: RGB) -> String { wrap(s, "38;2;\(c.r);\(c.g);\(c.b)") }
-
+extension Ansi {
     /// Colour a string by signal strength — a smooth 24-bit gradient on truecolor
     /// terminals, the 256-palette bucket otherwise.
     static func signalColored(_ s: String, _ rssi: Int) -> String {
@@ -135,63 +124,8 @@ enum Ansi {
     }
 }
 
-/// Named 256-colour palette for UI chrome. (Signal-quality colours live in
-/// signalColorCode; channel-map congestion colours in loadColor.)
-private enum Pal {
-    static let badgeFg = 231, badgeBg = 25   // "wifiscan" badge
-    static let label = 244                   // dim field labels & minor marks (DFS, hidden)
-    static let value = 252                   // field values (iface, SSID, …)
-    static let text = 250                    // neutral text (table header, rec tags)
-    static let heading = 39                  // channel-map band headings
-    static let accent = 47                   // recommendations heading / authorized
-    static let best = 46                     // highlighted cleanest channel
-    static let warn = 208                    // permission warning / not-authorized
-    static let error = 196                   // scan errors
-    static let scanning = 226                // scanning spinner
-}
-
 /// Braille spinner frames for the in-flight scan indicator.
 private let spinnerFrames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-
-/// Channel-map bar colour by congestion fraction (0 = quiet → 1 = busiest channel
-/// in the band), so the bar's colour and length tell the same story.
-private func loadColor(_ frac: Double) -> Int {
-    switch frac {
-    case ..<0.20: return 46     // green — quiet
-    case ..<0.45: return 82
-    case ..<0.70: return 226    // yellow
-    case ..<0.88: return 208    // orange
-    default:      return 196    // red — most congested
-    }
-}
-
-/// Clip a possibly-ANSI-coloured string to `cols` visible terminal cells,
-/// copying escape sequences verbatim and re-appending a reset if truncated so
-/// colour can't bleed past the cut.
-private func clipAnsi(_ s: String, _ cols: Int) -> String {
-    if cols <= 0 { return "" }
-    var out = "", width = 0, truncated = false
-    var i = s.startIndex
-    while i < s.endIndex {
-        let c = s[i]
-        if c == "\u{1B}" {                       // copy the whole escape sequence
-            out.append(c)
-            var j = s.index(after: i)
-            while j < s.endIndex {
-                let e = s[j]; out.append(e); j = s.index(after: j)
-                if e.isLetter { break }
-            }
-            i = j
-            continue
-        }
-        let cw = charDisplayWidth(c)
-        if width + cw > cols { truncated = true; break }
-        out.append(c); width += cw
-        i = s.index(after: i)
-    }
-    if truncated && Ansi.enabled { out += "\u{1B}[0m" }
-    return out
-}
 
 // MARK: - Rendering
 
@@ -1142,71 +1076,29 @@ func canWriteSurveyLog(_ path: String) -> Bool {
     return true
 }
 
-/// Aggregate a --log survey: per band, the cleanest candidate channel for each hour
-/// of day (congestion is time-of-day dependent — an evening-only scan misleads),
-/// plus the minimax "all-day pick" whose worst hour is the least bad.
+/// Aggregate a --log survey (see Survey.reportLines): per band, the cleanest candidate
+/// channel for each hour of day, plus the minimax all-day pick. Hours and dates are local.
 func runReport(path: String, app: App) {
     guard let raw = try? String(contentsOfFile: path, encoding: .utf8) else {
         die("cannot read survey log '\(path)'")
     }
-    let dec = JSONDecoder()
-    // Drop lines that don't decode (truncated) AND lines that decode but can't be
-    // real (see SurveyScan.plausible) — an impossible RSSI or utilization is +inf
-    // energy, which poisons every average and used to kill the run with a conversion
-    // trap, and an impossible width stalls the 6 GHz bonding table.
-    let scans = raw.split(whereSeparator: \.isNewline)
-        .compactMap { try? dec.decode(SurveyScan.self, from: Data($0.utf8)) }
-        .filter { $0.plausible }
+    let scans = Survey.parseLog(raw)
     if scans.isEmpty { die("no usable scans in '\(path)' — record some with --log first") }
 
     var excl = app.excludeSSIDs
+    // Nil in practice: report mode runs no scan helper and macOS redacts the SSID from
+    // the front-end, so the connected name each scan recorded for itself (folded in by
+    // reportLines) is what keeps your own AP out of the ranking.
     if let c = app.scanner.currentSSID { excl.insert(c) }
-    // The lookup above is nil in practice here: report mode runs no scan helper and
-    // macOS redacts the SSID from the front-end, so the connected name each scan
-    // recorded for itself is what keeps your own AP out of the ranking.
-    for s in scans { if let c = s.conn { excl.insert(c) } }
 
     let cal = Calendar.current
-    let hourly = Survey.byHour(scans) { cal.component(.hour, from: Date(timeIntervalSince1970: $0)) }
-
     let df = DateFormatter()
     df.locale = Locale(identifier: "en_US_POSIX")
     df.dateFormat = "yyyy-MM-dd HH:mm"
-    let tsMin = scans.map { $0.ts }.min()!, tsMax = scans.map { $0.ts }.max()!
-    print(Ansi.bold("wifiscan survey — \(scans.count) scans, "
-        + "\(df.string(from: Date(timeIntervalSince1970: tsMin))) → \(df.string(from: Date(timeIntervalSince1970: tsMax)))"))
-    if !excl.isEmpty {
-        print(Ansi.dim("ignoring your networks: \(excl.sorted().map(sanitizeSSID).joined(separator: ", "))"))
-    } else {
-        // Nothing to exclude means the log has no connected SSID in it (it predates
-        // that field) — say so, or a ranking that counts your own AP looks unexplained.
-        print(Ansi.dim("no networks excluded — this log records no connected SSID; pass --exclude-ssid to keep your own AP out"))
-    }
-
-    func loadText(_ w: Double) -> String { w > 0 ? "\(Int((10 * log10(w)).rounded()))dBm" : "clean" }
-
-    let plans: [(Band, [Int], String)] = [
-        (.ghz24, ChannelPlan.cand24, "1/6/11 only"),
-        (.ghz5, ChannelPlan.cand5NonDFS, "non-DFS"),
-        (.ghz6, ChannelPlan.cand6PSC, "PSC"),
-    ]
-    for (band, candidates, note) in plans {
-        guard scans.contains(where: { $0.nets.contains { Band.from($0.band) == band } }) else { continue }
-        print("")
-        print(Ansi.bold(Ansi.fg256("▎ \(band.longLabel)  (\(note))", Pal.heading)))
-        var hourlyLoads: [[ChannelLoad]] = []
-        for h in hourly.keys.sorted() {
-            let loads = Survey.averageLoads(hourly[h]!, band: band, candidates: candidates, excluding: excl)
-            hourlyLoads.append(loads)
-            let best = loads.min(by: Analysis.cleaner)!
-            let hh = padLeft(String(format: "%02d:00", h), 6)
-            print("  \(hh)  ch \(padTo("\(best.channel)", 4)) \(padLeft(loadText(best.weighted), 8))  (\(hourly[h]!.count) scans)")
-        }
-        if let pick = Survey.allDayPick(hourlyLoads) {
-            print("  " + Ansi.bold(Ansi.fg256("all-day pick: ch \(pick.channel)", Pal.best))
-                + Ansi.dim("  (worst hour \(loadText(pick.weighted)))"))
-        }
-    }
+    let lines = Survey.reportLines(scans, excluding: excl,
+                                   hourOf: { cal.component(.hour, from: Date(timeIntervalSince1970: $0)) },
+                                   dateText: { df.string(from: Date(timeIntervalSince1970: $0)) })
+    for line in lines { print(line) }
 }
 
 // MARK: - Out-of-process scan helper

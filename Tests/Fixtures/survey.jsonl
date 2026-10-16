@@ -1,0 +1,5 @@
+{"ts": 1791965100, "conn": "Home", "nets": [{"ssid": "Home", "rssi": -40, "channel": 1, "band": 1, "widthMHz": 20}, {"ssid": "Neighbor", "rssi": -60, "channel": 6, "band": 1, "widthMHz": 20}, {"ssid": "Cafe", "rssi": -70, "channel": 36, "band": 2, "widthMHz": 80, "utilization": 0.5}]}
+{"ts": 1791966000, "conn": "Home", "nets": [{"ssid": "Home", "rssi": -41, "channel": 1, "band": 1, "widthMHz": 20}, {"ssid": "Neighbor", "rssi": -62, "channel": 6, "band": 1, "widthMHz": 20}]}
+{"ts":1791968400,"conn":"Home","nets":[{"ssid":"Trunc
+{"ts": 1791979200, "nets": [{"ssid": "Bogus", "rssi": 5, "channel": 6, "band": 1, "widthMHz": 20}]}
+{"ts": 1792012200, "nets": [{"ssid": "Neighbor", "rssi": -55, "channel": 6, "band": 1, "widthMHz": 20}, {"ssid": "Flat", "rssi": -50, "channel": 11, "band": 1, "widthMHz": 20}, {"ssid": "Cafe", "rssi": -65, "channel": 149, "band": 2, "widthMHz": 20}]}

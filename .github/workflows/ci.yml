@@ -39,6 +39,18 @@ jobs:
       - name: Build (release bundle, Makefile)
         run: make build
 
+      # The release binary end to end on a fixture survey log: the Core tests pin the
+      # report text, this proves main.swift's file read, parsing and printing around it.
+      # TZ=UTC because the report buckets scans by local hour.
+      - name: Report smoke test (fixture survey log)
+        run: |
+          out="$(TZ=UTC .build/wifiscan.app/Contents/MacOS/wifiscan --report Tests/Fixtures/survey.jsonl)"
+          printf '%s\n' "$out"
+          printf '%s\n' "$out" | grep -qxF '  all-day pick: ch 1  (worst hour clean)'
+          printf '%s\n' "$out" | grep -qxF '  all-day pick: ch 153  (worst hour clean)'
+          set +e; .build/wifiscan.app/Contents/MacOS/wifiscan --report /nonexistent 2>/dev/null; rc=$?; set -e
+          [ "$rc" = 2 ] || { echo "--report on a missing file exited $rc, want 2"; exit 1; }
+
       # Fast, uninstrumented run of the dependency-free core unit tests.
       - name: Unit tests
         run: make test

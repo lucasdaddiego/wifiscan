@@ -349,6 +349,77 @@ enum Survey {
     }
 }
 
+// MARK: - Survey report (--report)
+
+extension Survey {
+    /// The scans of a JSONL survey log. Lines that do not decode (a truncated last line, a
+    /// stray edit) are dropped, and so are lines that decode but cannot be real (see
+    /// SurveyScan.plausible): an impossible RSSI or utilization is +inf energy, which
+    /// poisons every average and used to kill the run with a conversion trap, and an
+    /// impossible width stalls the 6 GHz bonding table.
+    static func parseLog(_ raw: String) -> [SurveyScan] {
+        let dec = JSONDecoder()
+        return raw.split(whereSeparator: \.isNewline)
+            .compactMap { try? dec.decode(SurveyScan.self, from: Data($0.utf8)) }
+            .filter { $0.plausible }
+    }
+
+    /// The bands a report ranks: each band's candidate channels and the note it prints.
+    static let reportPlans: [(band: Band, candidates: [Int], note: String)] = [
+        (.ghz24, ChannelPlan.cand24, "1/6/11 only"),
+        (.ghz5, ChannelPlan.cand5NonDFS, "non-DFS"),
+        (.ghz6, ChannelPlan.cand6PSC, "PSC"),
+    ]
+
+    /// An average interference energy as the report prints it: "-71dBm", or "clean".
+    static func loadText(_ w: Double) -> String { w > 0 ? "\(Int((10 * log10(w)).rounded()))dBm" : "clean" }
+
+    /// The `--report` text for `scans`: a header with the time range and the networks left
+    /// out, then per band (only bands the log saw) the cleanest candidate for each hour of
+    /// day and the minimax all-day pick. Congestion is time-of-day dependent — an
+    /// evening-only scan misleads — so each hour is ranked on its own scans. `excluding`
+    /// gets every scan's recorded `conn` added: report mode runs no scan helper, and macOS
+    /// denies the front-end the connected name, so the log is the only source for it.
+    /// `hourOf` and `dateText` map epoch seconds to the local hour / a date string, injected
+    /// so the caller picks the calendar and the tests stay deterministic. Empty in → empty out.
+    static func reportLines(_ scans: [SurveyScan], excluding: Set<String>,
+                            hourOf: (Double) -> Int, dateText: (Double) -> String) -> [String] {
+        guard let tsMin = scans.map({ $0.ts }).min(), let tsMax = scans.map({ $0.ts }).max() else { return [] }
+        var excl = excluding
+        for s in scans { if let c = s.conn { excl.insert(c) } }
+        let hourly = byHour(scans, hourOf: hourOf)
+
+        var out = [Ansi.bold("wifiscan survey — \(scans.count) scans, \(dateText(tsMin)) → \(dateText(tsMax))")]
+        if !excl.isEmpty {
+            out.append(Ansi.dim("ignoring your networks: \(excl.sorted().map(sanitizeSSID).joined(separator: ", "))"))
+        } else {
+            // Nothing to exclude means the log has no connected SSID in it (it predates that
+            // field) — say so, or a ranking that counts your own AP looks unexplained.
+            out.append(Ansi.dim("no networks excluded — this log records no connected SSID; pass --exclude-ssid to keep your own AP out"))
+        }
+
+        for plan in reportPlans {
+            guard scans.contains(where: { $0.nets.contains { Band.from($0.band) == plan.band } }) else { continue }
+            out.append("")
+            out.append(Ansi.bold(Ansi.fg256("▎ \(plan.band.longLabel)  (\(plan.note))", Pal.heading)))
+            var hourlyLoads: [[ChannelLoad]] = []
+            for h in hourly.keys.sorted() {
+                let hourScans = hourly[h]!
+                let loads = averageLoads(hourScans, band: plan.band, candidates: plan.candidates, excluding: excl)
+                hourlyLoads.append(loads)
+                let best = loads.min(by: Analysis.cleaner)!   // candidates are never empty
+                let hh = padLeft(String(format: "%02d:00", h), 6)
+                out.append("  \(hh)  ch \(padTo("\(best.channel)", 4)) \(padLeft(loadText(best.weighted), 8))  (\(hourScans.count) scans)")
+            }
+            if let pick = allDayPick(hourlyLoads) {
+                out.append("  " + Ansi.bold(Ansi.fg256("all-day pick: ch \(pick.channel)", Pal.best))
+                    + Ansi.dim("  (worst hour \(loadText(pick.weighted)))"))
+            }
+        }
+        return out
+    }
+}
+
 // MARK: - Sorting
 
 enum SortKey {
@@ -673,6 +744,81 @@ func padLeft(_ s: String, _ n: Int) -> String {
 /// height, so nothing below the last row needs clearing.
 func frameBytes(_ rows: [String], clear: Bool) -> String {
     (clear ? "\u{1B}[2J\u{1B}[H" : "\u{1B}[H") + rows.map { "\u{1B}[2K" + $0 }.joined(separator: "\r\n")
+}
+
+// MARK: - ANSI styling, palette & clipping
+//
+// The SGR wrappers, the UI palette and the escape-aware clipper: pure string work, so it
+// lives under the coverage gate. The terminal-capability half (truecolor gradients, the
+// signal bar) is an extension in main.swift, because it reads the environment.
+
+enum Ansi {
+    /// Set once in main() before any other thread exists, read-only afterwards —
+    /// hence exempt from the Swift 6 global-state check.
+    nonisolated(unsafe) static var enabled = true
+    static func wrap(_ s: String, _ code: String) -> String {
+        enabled ? "\u{1B}[\(code)m\(s)\u{1B}[0m" : s
+    }
+    static func bold(_ s: String) -> String { wrap(s, "1") }
+    static func dim(_ s: String) -> String { wrap(s, "2") }
+    static func fg256(_ s: String, _ c: Int) -> String { wrap(s, "38;5;\(c)") }
+    static func bg256(_ s: String, _ c: Int) -> String { wrap(s, "48;5;\(c)") }
+    static func fgRGB(_ s: String, _ c: RGB) -> String { wrap(s, "38;2;\(c.r);\(c.g);\(c.b)") }
+}
+
+/// Named 256-colour palette for UI chrome. (Signal-quality colours live in
+/// signalColorCode; channel-map congestion colours in loadColor.)
+enum Pal {
+    static let badgeFg = 231, badgeBg = 25   // "wifiscan" badge
+    static let label = 244                   // dim field labels & minor marks (DFS, hidden)
+    static let value = 252                   // field values (iface, SSID, …)
+    static let text = 250                    // neutral text (table header, rec tags)
+    static let heading = 39                  // channel-map band headings
+    static let accent = 47                   // recommendations heading / authorized
+    static let best = 46                     // highlighted cleanest channel
+    static let warn = 208                    // permission warning / not-authorized
+    static let error = 196                   // scan errors
+    static let scanning = 226                // scanning spinner
+}
+
+/// Channel-map bar colour by congestion fraction (0 = quiet → 1 = busiest channel
+/// in the band), so the bar's colour and length tell the same story.
+func loadColor(_ frac: Double) -> Int {
+    switch frac {
+    case ..<0.20: return 46     // green — quiet
+    case ..<0.45: return 82
+    case ..<0.70: return 226    // yellow
+    case ..<0.88: return 208    // orange
+    default:      return 196    // red — most congested
+    }
+}
+
+/// Clip a possibly-ANSI-coloured string to `cols` visible terminal cells,
+/// copying escape sequences verbatim and re-appending a reset if truncated so
+/// colour can't bleed past the cut.
+func clipAnsi(_ s: String, _ cols: Int) -> String {
+    if cols <= 0 { return "" }
+    var out = "", width = 0, truncated = false
+    var i = s.startIndex
+    while i < s.endIndex {
+        let c = s[i]
+        if c == "\u{1B}" {                       // copy the whole escape sequence
+            out.append(c)
+            var j = s.index(after: i)
+            while j < s.endIndex {
+                let e = s[j]; out.append(e); j = s.index(after: j)
+                if e.isLetter { break }
+            }
+            i = j
+            continue
+        }
+        let cw = charDisplayWidth(c)
+        if width + cw > cols { truncated = true; break }
+        out.append(c); width += cw
+        i = s.index(after: i)
+    }
+    if truncated && Ansi.enabled { out += "\u{1B}[0m" }
+    return out
 }
 
 // MARK: - Terminal-safe SSID display

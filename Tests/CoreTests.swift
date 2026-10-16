@@ -46,6 +46,8 @@ func order(_ nets: [BSS]) -> String { nets.map { $0.ssid }.joined() }
         testSanitize()
         testDaemonDir()
         testNetworkJSON()
+        testAnsi()
+        testReport()
 
         print("\(checks - failures)/\(checks) checks passed")
         exit(failures == 0 ? 0 : 1)
@@ -702,5 +704,106 @@ func order(_ nets: [BSS]) -> String { nets.map { $0.ssid }.joined() }
         let hidden = jsonObject(mk("‹hidden›", -60, 11, .ghz24, hidden: true))
         eq(hidden["ssid"] as? String, "‹hidden›", "a hidden network keeps the marker")
         ok(hidden["ssidHex"] == nil, "a hidden network has no ssidHex: the marker is not a name")
+    }
+
+    // MARK: ANSI styling, palette & clipping
+
+    static func testAnsi() {
+        let was = Ansi.enabled
+        defer { Ansi.enabled = was }
+        Ansi.enabled = true
+        eq(Ansi.bold("x"), "\u{1B}[1mx\u{1B}[0m", "bold wraps in SGR 1")
+        eq(Ansi.dim("x"), "\u{1B}[2mx\u{1B}[0m", "dim wraps in SGR 2")
+        eq(Ansi.fg256("x", 39), "\u{1B}[38;5;39mx\u{1B}[0m", "fg256")
+        eq(Ansi.bg256("x", 25), "\u{1B}[48;5;25mx\u{1B}[0m", "bg256")
+        eq(Ansi.fgRGB("x", (1, 2, 3)), "\u{1B}[38;2;1;2;3mx\u{1B}[0m", "fgRGB")
+        // Clipping: escapes are copied whole and cost no width; a cut re-appends a reset.
+        let red = Ansi.fg256("abcdef", 196)
+        eq(clipAnsi(red, 3), "\u{1B}[38;5;196mabc\u{1B}[0m", "a cut keeps the colour and resets after it")
+        eq(clipAnsi(red, 6), red, "a string that fits is untouched")
+        eq(clipAnsi("你好x", 3), "你\u{1B}[0m", "a wide glyph that would straddle the edge is dropped whole")
+        eq(clipAnsi("abc", 0), "", "zero columns → empty")
+        eq(clipAnsi("ab\u{1B}[0", 5), "ab\u{1B}[0", "an unterminated escape at the end is copied as-is")
+        Ansi.enabled = false
+        eq(Ansi.bold("x"), "x", "colour off → plain text")
+        eq(clipAnsi("abcdef", 3), "abc", "colour off → no reset after a cut")
+
+        eq(loadColor(0.1), 46, "quiet → green")
+        eq(loadColor(0.3), 82, "light → light green")
+        eq(loadColor(0.6), 226, "moderate → yellow")
+        eq(loadColor(0.8), 208, "busy → orange")
+        eq(loadColor(1.0), 196, "busiest → red")
+        ok(Set([Pal.label, Pal.value, Pal.text, Pal.heading, Pal.accent, Pal.best, Pal.warn, Pal.error,
+                Pal.scanning, Pal.badgeFg, Pal.badgeBg]).count == 11, "palette roles are distinct colours")
+    }
+
+    // MARK: Survey report (--report)
+
+    /// Tests/Fixtures/survey.jsonl: three real scans at 08:05, 08:20 and 21:10 UTC on
+    /// 2026-10-14, plus a truncated line and a line with an impossible RSSI (both dropped).
+    static let fixtureURL = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        .appendingPathComponent("Fixtures/survey.jsonl")
+
+    static func testReport() {
+        let was = Ansi.enabled
+        defer { Ansi.enabled = was }
+        Ansi.enabled = false
+
+        let raw = try! String(contentsOf: fixtureURL, encoding: .utf8)
+        let scans = Survey.parseLog(raw)
+        eq(scans.count, 3, "fixture: the truncated line and the impossible RSSI are dropped")
+
+        var utc = Calendar(identifier: .gregorian)
+        utc.timeZone = TimeZone(identifier: "UTC")!
+        let df = DateFormatter()
+        df.locale = Locale(identifier: "en_US_POSIX")
+        df.timeZone = TimeZone(identifier: "UTC")
+        df.dateFormat = "yyyy-MM-dd HH:mm"
+        func report(_ s: [SurveyScan], excluding: Set<String> = []) -> [String] {
+            Survey.reportLines(s, excluding: excluding,
+                               hourOf: { utc.component(.hour, from: Date(timeIntervalSince1970: $0)) },
+                               dateText: { df.string(from: Date(timeIntervalSince1970: $0)) })
+        }
+        // 2.4 GHz: "Home" on ch 1 is the recorded `conn`, so it is ignored and ch 1 reads
+        // clean in both hours. 5 GHz: an 80 MHz AP on 36–48 at 08:00 (in one of the two
+        // 08:xx scans, at 50% airtime) and a 20 MHz AP on 149 at 21:00 — so the cleanest
+        // channel flips between hours, and the all-day pick is 153, clean in both.
+        eq(report(scans), [
+            "wifiscan survey — 3 scans, 2026-10-14 08:05 → 2026-10-14 21:10",
+            "ignoring your networks: Home",
+            "",
+            "▎ 2.4 GHz  (1/6/11 only)",
+            "   08:00  ch 1       clean  (2 scans)",
+            "   21:00  ch 1       clean  (1 scans)",
+            "  all-day pick: ch 1  (worst hour clean)",
+            "",
+            "▎ 5 GHz  (non-DFS)",
+            "   08:00  ch 149     clean  (2 scans)",
+            "   21:00  ch 36      clean  (1 scans)",
+            "  all-day pick: ch 153  (worst hour clean)",
+        ], "fixture report: per-hour cleanest channel and the minimax pick, per band seen")
+
+        // Without the conn exclusion, your own AP repels the 2.4 GHz pick off its channel.
+        let noConn = scans.map { SurveyScan(ts: $0.ts, nets: $0.nets) }
+        let lines = report(noConn)
+        eq(lines[1], "no networks excluded — this log records no connected SSID; pass --exclude-ssid to keep your own AP out",
+           "a log without conn says why nothing is excluded")
+        eq(lines[6], "  all-day pick: ch 6  (worst hour -55dBm)", "your own AP on ch 1 now repels the pick off it")
+        eq(report(noConn, excluding: ["Home"])[1], "ignoring your networks: Home", "--exclude-ssid fills the gap")
+        eq(report(noConn, excluding: ["evil\u{1B}[2J"])[1], "ignoring your networks: evil·[2J",
+           "excluded names are sanitized before they are printed")
+
+        eq(report([]), [], "no scans → no report")
+        eq(report([SurveyScan(ts: 0, nets: [SurveyNet(mk("x", -50, 37, .ghz6))])]).last,
+           "  all-day pick: ch 5  (worst hour clean)", "a 6 GHz-only log reports the PSC channels")
+
+        eq(Survey.loadText(0), "clean", "no energy → clean")
+        eq(Survey.loadText(1e-7), "-70dBm", "energy → dBm")
+        eq(Survey.parseLog("").count, 0, "an empty log → no scans")
+        eq(Survey.parseLog("{\"ts\":1,\"nets\":[]}\r\n\n{\"ts\":2,\"nets\":[]}").map { $0.ts }, [1, 2],
+           "blank lines and CRLF endings are skipped")
+
+        Ansi.enabled = true
+        ok(report(scans)[0].hasPrefix("\u{1B}[1m"), "the header is bold when colour is on")
     }
 }

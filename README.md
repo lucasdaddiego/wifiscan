@@ -101,7 +101,7 @@ so it works on the latest macOS with nothing to install.
 
 ## Requirements
 
-- **macOS** (built & tested on **macOS 26 / Apple Silicon**; targets macOS 12+).
+- **macOS** (built & tested on **macOS 26 and 27 / Apple Silicon**; targets macOS 12+).
 - **Xcode Command Line Tools** for `swiftc` — `xcode-select --install`.
 - That's it. No Homebrew formulae, no Swift packages.
 

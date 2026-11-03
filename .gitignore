@@ -1,5 +1,7 @@
-# Build artifacts (the release binary is deployed to ~/.bin, never committed)
+# Build artifacts, never committed: the app bundle is assembled under .build/ and installed
+# into ~/Applications; /wifiscan is where older Makefiles put a bare binary
 /wifiscan
+*.app
 .build/
 _CodeSignature/
 *.dSYM/

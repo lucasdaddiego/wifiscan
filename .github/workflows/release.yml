@@ -20,7 +20,8 @@ permissions: {}
 jobs:
   release:
     name: build universal · publish
-    runs-on: macos-latest
+    # The same explicit image as ci.yml: see the note there.
+    runs-on: macos-26
     permissions:
       contents: write
     steps:

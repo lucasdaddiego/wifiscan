@@ -17,7 +17,7 @@ jobs:
   build-test-coverage:
     name: build · test · 100% coverage
     # An explicit image, not macos-latest: the swift-tools-version in Package.swift must not
-    # exceed the Swift this image's default Xcode ships (xcode-27 = Xcode 27.x), and the
+    # exceed the Swift this image's default Xcode ships (Xcode 27.1 = Swift 6.4), and the
     # -latest alias moves to the next macOS on GitHub's schedule, not ours. Bump the label
     # and the tools-version together.
     runs-on: xcode-27

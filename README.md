@@ -101,7 +101,7 @@ so it works on the latest macOS with nothing to install.
 
 ## Requirements
 
-- **macOS** (built & tested on **macOS 26 and 27 / Apple Silicon**; targets macOS 12+).
+- **macOS** (built & tested on **macOS 27 / Apple Silicon**; targets macOS 12+).
 - **Xcode Command Line Tools** for `swiftc` — `xcode-select --install`.
 - That's it. No Homebrew formulae, no Swift packages.
 
@@ -482,7 +482,7 @@ Makefile.local                optional, git-ignored: machine-local SIGN identity
 No third‑party dependencies — just the system **CoreWLAN**, **CoreLocation** and
 **Foundation** frameworks. Builds in **Swift 6 language mode** (strict concurrency
 checking; Swift 6.0+ toolchain, i.e. Xcode 16 / CLT 16 or newer). `swift build` reads
-`Package.swift` (tools-version 6.3), so it needs Swift 6.3+; `make` works with any Swift 6
+`Package.swift` (tools-version 6.4), so it needs Swift 6.4+; `make` works with any Swift 6
 `swiftc`.
 
 ## Development

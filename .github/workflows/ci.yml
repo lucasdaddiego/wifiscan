@@ -17,10 +17,10 @@ jobs:
   build-test-coverage:
     name: build · test · 100% coverage
     # An explicit image, not macos-latest: the swift-tools-version in Package.swift must not
-    # exceed the Swift this image's default Xcode ships (Xcode 26.x = Swift 6.3), and the
+    # exceed the Swift this image's default Xcode ships (xcode-27 = Xcode 27.x), and the
     # -latest alias moves to the next macOS on GitHub's schedule, not ours. Bump the label
     # and the tools-version together.
-    runs-on: macos-26
+    runs-on: xcode-27
     steps:
       # Pinned to a commit, not a tag: a moved tag would run foreign code here. Dependabot
       # (.github/dependabot.yml) keeps the SHA current.

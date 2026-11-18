@@ -21,7 +21,7 @@ jobs:
   release:
     name: build universal · publish
     # The same explicit image as ci.yml: see the note there.
-    runs-on: macos-26
+    runs-on: xcode-27
     permissions:
       contents: write
     steps:
